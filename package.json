@@ -1,0 +1,70 @@
+{
+  "name": "socrate",
+  "productName": "Socrate",
+  "description": "Interface de pensée locale avec IA",
+  "author": {
+    "name": "Etienne",
+    "email": "s1t0m3@protonmail.com"
+  },
+  "homepage": "https://github.com/Ghost0fMars/Socrate",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "electron-dist/main.js",
+  "scripts": {
+    "dev": "vite --port=5173 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist electron-dist release",
+    "lint": "tsc --noEmit",
+    "electron:compile": "mkdir -p electron-dist && echo '{\"type\":\"commonjs\"}' > electron-dist/package.json && tsc -p tsconfig.electron.json",
+    "electron:pack": "VITE_API_URL=http://localhost:8000 vite build && npm run electron:compile",
+    "electron:start": "npm run electron:pack && electron .",
+    "dist": "npm run electron:pack && electron-builder"
+  },
+  "build": {
+    "appId": "com.socrate.app",
+    "productName": "Socrate",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron-dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server",
+        "filter": [
+          "**/*",
+          "!.venv/**",
+          "!__pycache__/**",
+          "!*.pyc"
+        ]
+      }
+    ],
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Utility"
+    }
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "autoprefixer": "^10.4.21",
+    "electron": "^36.9.5",
+    "electron-builder": "^26.8.1",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "react-markdown": "^10.1.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  }
+}

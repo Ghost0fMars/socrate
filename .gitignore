@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+electron-dist/
+release/
+coverage/
+.DS_Store
+*.log
+.env*
+server/.venv/
+server/chroma_db/
+server/__pycache__/

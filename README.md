@@ -1,20 +1,32 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Socrate
 
-# Run and deploy your AI Studio app
+Interface de pensée locale avec IA — Electron + React + FastAPI + Ollama + ChromaDB.
 
-This contains everything you need to run your app locally.
+## Prérequis
 
-View your app in AI Studio: https://ai.studio/apps/6e086ee8-0212-4c3c-ae5c-47e85b9da2fa
+- [Node.js](https://nodejs.org) v20+
+- [Python](https://python.org) 3.11+
+- [Ollama](https://ollama.com) avec les modèles `llama3.2` et `nomic-embed-text`
 
-## Run Locally
+## Lancer en développement
 
-**Prerequisites:**  Node.js
+**Backend**
+```bash
+cd server && bash start.sh
+```
 
+**Frontend**
+```bash
+npm install
+npm run dev
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Ouvrir `http://localhost:5173`
+
+## Build Electron
+
+```bash
+npm run dist
+```
+
+Les fichiers sont générés dans `release/`.

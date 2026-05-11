@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Loader2, FileText, Trash2, UploadCloud, X } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -12,7 +12,12 @@ import {
   uploadDocument,
   listDocuments,
   deleteDocument,
+  getCorpusStats,
+  indexCorpus,
+  listModels,
   type Document,
+  type CorpusStats,
+  type ModelInfo,
 } from "./lib/api";
 
 interface Message {
@@ -21,18 +26,39 @@ interface Message {
   content: string;
 }
 
+const MODEL_LABELS: Record<string, string> = {
+  "qwen3:14b": "Reflexion",
+  "gemma3:12b": "Fiction",
+};
+
+const getModelLabel = (name: string) => MODEL_LABELS[name] ?? name;
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [showDocs, setShowDocs] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [corpusStats, setCorpusStats] = useState<CorpusStats>({
+    documents: 0,
+    chunks: 0,
+    words: 0,
+  });
+  const [useCorpus, setUseCorpus] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [indexingCorpus, setIndexingCorpus] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [indexMessage, setIndexMessage] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const formatNumber = (value: number) =>
+    new Intl.NumberFormat("fr-FR").format(value);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -40,9 +66,15 @@ export default function App() {
     }
   }, [messages]);
 
+  useEffect(() => {
+    return () => abortControllerRef.current?.abort();
+  }, []);
+
   const loadDocuments = useCallback(async () => {
     try {
-      setDocuments(await listDocuments());
+      const [docs, stats] = await Promise.all([listDocuments(), getCorpusStats()]);
+      setDocuments(docs);
+      setCorpusStats(stats);
     } catch {
       // backend not yet reachable on first load
     }
@@ -52,9 +84,32 @@ export default function App() {
     loadDocuments();
   }, [loadDocuments]);
 
+  const loadModels = useCallback(async () => {
+    try {
+      const response = await listModels();
+      setModels(response.models);
+      setSelectedModel((current) => {
+        if (current && response.models.some((model) => model.name === current)) {
+          return current;
+        }
+        if (response.models.some((model) => model.name === response.default)) {
+          return response.default;
+        }
+        return response.models[0]?.name ?? response.default;
+      });
+    } catch {
+      // backend not yet reachable on first load
+    }
+  }, []);
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
+
   const handleUpload = async (file: File) => {
     setUploading(true);
     setUploadError("");
+    setIndexMessage("");
     try {
       await uploadDocument(file);
       await loadDocuments();
@@ -81,10 +136,36 @@ export default function App() {
   const handleDeleteDoc = async (id: string) => {
     try {
       await deleteDocument(id);
-      setDocuments((prev) => prev.filter((d) => d.id !== id));
+      await loadDocuments();
     } catch {
       // ignore
     }
+  };
+
+  const handleIndexCorpus = async () => {
+    setIndexingCorpus(true);
+    setUploadError("");
+    setIndexMessage("");
+    try {
+      const result = await indexCorpus();
+      await loadDocuments();
+      setIndexMessage(
+        `${result.indexed.length}/${result.files} fichiers indexes depuis SocrateCorpus.`,
+      );
+      if (result.errors.length > 0) {
+        setUploadError(`${result.errors.length} fichier(s) n'ont pas pu etre lus.`);
+      }
+    } catch (e: unknown) {
+      setUploadError(e instanceof Error ? e.message : "Erreur inconnue.");
+    } finally {
+      setIndexingCorpus(false);
+    }
+  };
+
+  const handleStop = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsLoading(false);
   };
 
   const handleSubmit = async (e?: React.SyntheticEvent<HTMLFormElement>) => {
@@ -102,6 +183,8 @@ export default function App() {
     setIsLoading(true);
 
     const botMessageId = (Date.now() + 1).toString();
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
     const history = messages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -109,7 +192,13 @@ export default function App() {
 
     try {
       let accumulated = "";
-      const stream = sendMessageStream(inputValue, history);
+      const stream = sendMessageStream(
+        inputValue,
+        history,
+        useCorpus,
+        selectedModel,
+        abortController.signal,
+      );
 
       for await (const chunk of stream) {
         accumulated += chunk;
@@ -127,6 +216,9 @@ export default function App() {
         });
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
       console.error("Chat error:", error);
       setMessages((prev) => [
         ...prev,
@@ -138,6 +230,9 @@ export default function App() {
         },
       ]);
     } finally {
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
       setIsLoading(false);
     }
   };
@@ -151,7 +246,7 @@ export default function App() {
             <div className="w-3 h-3 bg-white rotate-45"></div>
           </div>
           <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase [writing-mode:vertical-rl] rotate-180">
-            Interface_01
+            S0CR4T3
           </span>
         </div>
 
@@ -184,77 +279,94 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto no-scrollbar px-6 md:px-32 py-16 space-y-24 scroll-smooth">
           <AnimatePresence initial={false}>
-            {messages.length === 0 ? (
+            {messages.map((message) => (
               <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="h-full flex flex-col justify-center max-w-xl"
+                key={message.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={`flex w-full ${message.role === "user" ? "justify-end" : "justify-start"}`}
               >
-                <h1 className="text-3xl md:text-5xl font-serif italic tracking-tight leading-tight mb-4">
-                  Penser{" "}
-                  <span className="font-sans not-italic text-sm uppercase tracking-[0.3em] align-middle ml-4 text-[#8C8C8C]">
-                    v01
-                  </span>
-                </h1>
-                <p className="text-lg md:text-xl font-light text-[#8C8C8C] max-w-md">
-                  Partageons une pensée, explorons l'invisible.
-                </p>
-              </motion.div>
-            ) : (
-              messages.map((message) => (
-                <motion.div
-                  key={message.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className={`flex w-full ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                <div
+                  className={`max-w-2xl w-full ${message.role === "user" ? "text-right ml-auto" : "text-left mr-auto"}`}
                 >
+                  <p className="text-[10px] tracking-widest text-[#8C8C8C] mb-4 uppercase font-semibold">
+                    {message.role === "user" ? "Vous" : "L'Esprit"}
+                  </p>
                   <div
-                    className={`max-w-2xl w-full ${message.role === "user" ? "text-right ml-auto" : "text-left mr-auto"}`}
+                    className={`markdown-body ${message.role === "user" ? "text-2xl font-light leading-snug" : "text-lg leading-relaxed font-light"}`}
                   >
-                    <p className="text-[10px] tracking-widest text-[#8C8C8C] mb-4 uppercase font-semibold">
-                      {message.role === "user" ? "Vous" : "L'Esprit"}
-                    </p>
-                    <div
-                      className={`markdown-body ${message.role === "user" ? "text-2xl font-light leading-snug" : "text-lg leading-relaxed font-light"}`}
-                    >
-                      {message.role === "user" ? (
-                        <span className="font-light">{message.content}</span>
-                      ) : (
-                        <Markdown>{message.content}</Markdown>
-                      )}
-                    </div>
+                    {message.role === "user" ? (
+                      <span className="font-light">{message.content}</span>
+                    ) : (
+                      <Markdown>{message.content}</Markdown>
+                    )}
                   </div>
-                </motion.div>
-              ))
-            )}
+                </div>
+              </motion.div>
+            ))}
           </AnimatePresence>
           <div ref={scrollRef} />
         </div>
 
-        <div className="h-32 md:h-40 px-6 md:px-32 flex items-center border-t border-[#E5E2DD] bg-[#FDFCFA]">
+        <div className="h-24 md:h-28 px-6 md:px-24 flex items-center border-t border-[#E5E2DD] bg-[#FDFCFA]">
           <form
             onSubmit={handleSubmit}
-            className="w-full flex items-center justify-between group"
+            className="w-full flex items-center gap-4 group"
           >
+            <button
+              type="button"
+              onClick={() => setUseCorpus((v) => !v)}
+              disabled={documents.length === 0}
+              title={useCorpus ? "Corpus actif" : "Corpus inactif"}
+              className={`h-8 w-8 shrink-0 border flex items-center justify-center transition-colors disabled:opacity-30 ${
+                useCorpus && documents.length > 0
+                  ? "border-black text-black bg-[#F5F2EF]"
+                  : "border-[#E5E2DD] text-[#CBC7C0] hover:text-black"
+              }`}
+            >
+              <BookOpen size={13} />
+            </button>
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              disabled={models.length === 0 || isLoading}
+              title="Modele Ollama"
+              className="h-8 max-w-40 shrink-0 border border-[#E5E2DD] bg-transparent px-2 text-[10px] tracking-widest uppercase text-[#8C8C8C] outline-none transition-colors hover:border-[#CBC7C0] disabled:opacity-30"
+            >
+              {models.length === 0 ? (
+                <option value="">Aucun modele</option>
+              ) : (
+                models.map((model) => (
+                  <option key={model.name} value={model.name}>
+                    {getModelLabel(model.name)}
+                  </option>
+                ))
+              )}
+            </select>
             <input
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Écrivez ici..."
+              placeholder=""
               disabled={isLoading}
-              className="bg-transparent w-full text-lg md:text-2xl font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
+              className="bg-transparent min-w-0 flex-1 text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
             />
             <button
-              type="submit"
-              disabled={isLoading || !inputValue.trim()}
-              className="ml-4 flex items-center gap-4 text-[11px] tracking-[0.2em] font-bold group-hover:text-black text-[#8C8C8C] transition-colors disabled:opacity-20 uppercase whitespace-nowrap"
+              type={isLoading ? "button" : "submit"}
+              onClick={isLoading ? handleStop : undefined}
+              disabled={!isLoading && !inputValue.trim()}
+              className={`ml-auto flex items-center gap-3 text-[10px] tracking-[0.18em] font-bold transition-colors disabled:opacity-20 uppercase whitespace-nowrap ${
+                isLoading
+                  ? "text-red-400 hover:text-red-500"
+                  : "group-hover:text-black text-[#8C8C8C]"
+              }`}
             >
               {isLoading ? (
-                <Loader2 size={14} className="animate-spin" />
+                "STOP"
               ) : (
                 "ENVOYER"
               )}
-              <div className="w-8 md:w-16 h-[1px] bg-current"></div>
+              <div className="w-6 md:w-12 h-[1px] bg-current"></div>
             </button>
           </form>
         </div>
@@ -273,7 +385,7 @@ export default function App() {
             {/* Panel header */}
             <div className="flex items-center justify-between px-6 py-6 border-b border-[#E5E2DD]">
               <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
-                Documents
+                Corpus
               </span>
               <button
                 onClick={() => setShowDocs(false)}
@@ -283,8 +395,44 @@ export default function App() {
               </button>
             </div>
 
+            <div className="grid grid-cols-3 border-b border-[#E5E2DD]">
+              <div className="px-4 py-4 border-r border-[#E5E2DD]">
+                <p className="text-[9px] tracking-widest text-[#CBC7C0] uppercase">
+                  Docs
+                </p>
+                <p className="text-lg font-light">{corpusStats.documents}</p>
+              </div>
+              <div className="px-4 py-4 border-r border-[#E5E2DD]">
+                <p className="text-[9px] tracking-widest text-[#CBC7C0] uppercase">
+                  Extraits
+                </p>
+                <p className="text-lg font-light">{corpusStats.chunks}</p>
+              </div>
+              <div className="px-4 py-4">
+                <p className="text-[9px] tracking-widest text-[#CBC7C0] uppercase">
+                  Mots
+                </p>
+                <p className="text-lg font-light">
+                  {formatNumber(corpusStats.words)}
+                </p>
+              </div>
+            </div>
+
             {/* Upload zone */}
             <div className="px-6 py-5 border-b border-[#E5E2DD]">
+              <button
+                type="button"
+                onClick={handleIndexCorpus}
+                disabled={indexingCorpus || uploading}
+                className="mb-4 flex h-8 w-full items-center justify-center gap-2 border border-[#E5E2DD] text-[10px] font-semibold uppercase tracking-widest text-[#8C8C8C] transition-colors hover:border-[#CBC7C0] hover:text-black disabled:opacity-30"
+              >
+                {indexingCorpus ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <BookOpen size={12} />
+                )}
+                {indexingCorpus ? "Indexation du dossier..." : "Indexer SocrateCorpus"}
+              </button>
               <div
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -308,18 +456,21 @@ export default function App() {
                   {uploading ? "Indexation..." : "Déposer un fichier"}
                 </span>
                 <span className="text-[10px] text-[#CBC7C0]">
-                  PDF · TXT · MD
+                  PDF / DOCX / TXT / MD
                 </span>
               </div>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf,.txt,.md"
+                accept=".pdf,.docx,.txt,.md"
                 className="hidden"
                 onChange={handleFileInput}
               />
               {uploadError && (
                 <p className="mt-3 text-[11px] text-red-400">{uploadError}</p>
+              )}
+              {indexMessage && (
+                <p className="mt-3 text-[11px] text-[#8C8C8C]">{indexMessage}</p>
               )}
             </div>
 
@@ -335,17 +486,24 @@ export default function App() {
                     key={doc.id}
                     className="flex items-center justify-between gap-2 py-3 border-b border-[#F0EDE9] group"
                   >
-                    <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex items-start gap-2 min-w-0">
                       <FileText
                         size={12}
-                        className="text-[#CBC7C0] shrink-0"
+                        className="text-[#CBC7C0] shrink-0 mt-1"
                       />
-                      <span
-                        className="text-[12px] text-[#4A4A4A] truncate"
-                        title={doc.name}
-                      >
-                        {doc.name}
-                      </span>
+                      <div className="min-w-0">
+                        <p
+                          className="text-[12px] text-[#4A4A4A] truncate"
+                          title={doc.name}
+                        >
+                          {doc.name}
+                        </p>
+                        <p className="text-[10px] text-[#CBC7C0] mt-1">
+                          {doc.category ? `${doc.category} / ` : ""}
+                          {doc.chunks || 0} extraits ·{" "}
+                          {formatNumber(doc.word_count || 0)} mots
+                        </p>
+                      </div>
                     </div>
                     <button
                       onClick={() => handleDeleteDoc(doc.id)}

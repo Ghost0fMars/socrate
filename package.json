@@ -17,8 +17,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist electron-dist release",
     "lint": "tsc --noEmit",
-    "electron:compile": "mkdir -p electron-dist && echo '{\"type\":\"commonjs\"}' > electron-dist/package.json && tsc -p tsconfig.electron.json",
-    "electron:pack": "VITE_API_URL=http://localhost:8000 vite build && npm run electron:compile",
+    "electron:compile": "node -e \"require('fs').mkdirSync('electron-dist',{recursive:true}); require('fs').writeFileSync('electron-dist/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && tsc -p tsconfig.electron.json",
+    "electron:pack": "cross-env VITE_API_URL=http://localhost:8000 vite build && npm run electron:compile",
     "electron:start": "npm run electron:pack && electron .",
     "dist": "npm run electron:pack && electron-builder"
   },
@@ -55,6 +55,7 @@
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.4",
     "autoprefixer": "^10.4.21",
+    "cross-env": "^10.1.0",
     "electron": "^36.9.5",
     "electron-builder": "^26.8.1",
     "lucide-react": "^0.546.0",

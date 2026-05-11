@@ -8,6 +8,9 @@ interface HistoryEntry {
 export async function* sendMessageStream(
   prompt: string,
   history: HistoryEntry[] = [],
+  useCorpus = true,
+  model?: string,
+  signal?: AbortSignal,
 ) {
   const messages = history.map((m) => ({
     role: m.role === "model" ? "assistant" : m.role,
@@ -17,7 +20,13 @@ export async function* sendMessageStream(
   const response = await fetch(`${API}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: prompt, history: messages }),
+    body: JSON.stringify({
+      message: prompt,
+      history: messages,
+      use_corpus: useCorpus,
+      model,
+    }),
+    signal,
   });
 
   if (!response.ok) throw new Error(`Erreur serveur : ${response.status}`);
@@ -37,11 +46,40 @@ export async function* sendMessageStream(
 export interface Document {
   id: string;
   name: string;
+  chunks: number;
+  word_count: number;
+  indexed_at: string;
+  path: string;
+  category: string;
+}
+
+export interface CorpusStats {
+  documents: number;
+  chunks: number;
+  words: number;
+}
+
+export interface ModelInfo {
+  name: string;
+  size: number;
+  modified_at: string;
+}
+
+export interface ModelsResponse {
+  default: string;
+  models: ModelInfo[];
+}
+
+export interface IndexCorpusResponse {
+  path: string;
+  files: number;
+  indexed: Document[];
+  errors: Array<{ path: string; error: string }>;
 }
 
 export async function uploadDocument(
   file: File,
-): Promise<{ id: string; name: string; chunks: number }> {
+): Promise<Document> {
   const body = new FormData();
   body.append("file", file);
   const response = await fetch(`${API}/documents/upload`, {
@@ -58,6 +96,29 @@ export async function uploadDocument(
 export async function listDocuments(): Promise<Document[]> {
   const response = await fetch(`${API}/documents`);
   if (!response.ok) throw new Error("Impossible de charger les documents.");
+  return response.json();
+}
+
+export async function getCorpusStats(): Promise<CorpusStats> {
+  const response = await fetch(`${API}/documents/stats`);
+  if (!response.ok) throw new Error("Impossible de charger le corpus.");
+  return response.json();
+}
+
+export async function indexCorpus(): Promise<IndexCorpusResponse> {
+  const response = await fetch(`${API}/documents/index-corpus`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail ?? "Erreur lors de l'indexation du corpus.");
+  }
+  return response.json();
+}
+
+export async function listModels(): Promise<ModelsResponse> {
+  const response = await fetch(`${API}/models`);
+  if (!response.ok) throw new Error("Impossible de charger les modeles.");
   return response.json();
 }
 

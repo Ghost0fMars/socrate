@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -25,6 +25,28 @@ interface Message {
   id: string;
   role: "user" | "model";
   content: string;
+}
+
+interface Conversation {
+  id: string;
+  title: string;
+  model: string;
+  messages: Message[];
+  updatedAt: number;
+}
+
+const STORAGE_KEY = "socrate_conversations";
+
+function loadConversations(): Conversation[] {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function persistConversations(convs: Conversation[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(convs));
 }
 
 const MODEL_LABELS: Record<string, string> = {
@@ -59,6 +81,10 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [showHistory, setShowHistory] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const [currentConvId, setCurrentConvId] = useState<string | null>(null);
+
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("fr-FR").format(value);
 
@@ -74,6 +100,25 @@ export default function App() {
       if (indexPollRef.current) clearInterval(indexPollRef.current);
     };
   }, []);
+
+  // Auto-save current conversation when messages change
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const firstUserMsg = messages.find((m) => m.role === "user");
+    const title = firstUserMsg
+      ? firstUserMsg.content.slice(0, 60) + (firstUserMsg.content.length > 60 ? "…" : "")
+      : "Conversation";
+
+    setConversations((prev) => {
+      const id = currentConvId ?? Date.now().toString();
+      if (!currentConvId) setCurrentConvId(id);
+      const conv: Conversation = { id, title, model: selectedModel, messages, updatedAt: Date.now() };
+      const exists = prev.some((c) => c.id === id);
+      const updated = exists ? prev.map((c) => (c.id === id ? conv : c)) : [conv, ...prev];
+      persistConversations(updated);
+      return updated;
+    });
+  }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadDocuments = useCallback(async () => {
     try {
@@ -110,6 +155,35 @@ export default function App() {
   useEffect(() => {
     loadModels();
   }, [loadModels]);
+
+  const handleNewConversation = () => {
+    abortControllerRef.current?.abort();
+    setMessages([]);
+    setCurrentConvId(null);
+    setInputValue("");
+    setIsLoading(false);
+  };
+
+  const handleLoadConversation = (conv: Conversation) => {
+    abortControllerRef.current?.abort();
+    setMessages(conv.messages);
+    setCurrentConvId(conv.id);
+    setSelectedModel(conv.model || selectedModel);
+    setIsLoading(false);
+    setShowHistory(false);
+  };
+
+  const handleDeleteConversation = (id: string) => {
+    setConversations((prev) => {
+      const updated = prev.filter((c) => c.id !== id);
+      persistConversations(updated);
+      return updated;
+    });
+    if (currentConvId === id) {
+      setMessages([]);
+      setCurrentConvId(null);
+    }
+  };
 
   const handleUpload = async (file: File) => {
     setUploading(true);
@@ -183,6 +257,16 @@ export default function App() {
       setUploadError(e instanceof Error ? e.message : "Erreur inconnue.");
       setIndexingCorpus(false);
     }
+  };
+
+  const handleExport = (content: string) => {
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `socrate_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleStop = () => {
@@ -260,6 +344,14 @@ export default function App() {
     }
   };
 
+  const formatDate = (ts: number) => {
+    const d = new Date(ts);
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    if (isToday) return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
+  };
+
   return (
     <div className="flex h-screen w-full bg-[#FDFCFA] text-[#1A1A1A] overflow-hidden">
       {/* Left Navigation */}
@@ -274,9 +366,38 @@ export default function App() {
         </div>
 
         <div className="flex flex-col items-center gap-6">
+          {/* New conversation */}
+          <button
+            onClick={handleNewConversation}
+            title="Nouvelle conversation"
+            className="flex flex-col items-center gap-1 group"
+          >
+            <Plus
+              size={18}
+              className="text-[#CBC7C0] group-hover:text-black transition-colors"
+            />
+          </button>
+
+          {/* History toggle */}
+          <button
+            onClick={() => { setShowHistory((v) => !v); setShowDocs(false); }}
+            title="Historique"
+            className="relative flex flex-col items-center gap-1 group"
+          >
+            <History
+              size={18}
+              className={`transition-colors ${showHistory ? "text-black" : "text-[#CBC7C0] group-hover:text-black"}`}
+            />
+            {conversations.length > 0 && (
+              <span className="text-[9px] font-bold tracking-widest text-[#8C8C8C]">
+                {conversations.length}
+              </span>
+            )}
+          </button>
+
           {/* Document toggle */}
           <button
-            onClick={() => setShowDocs((v) => !v)}
+            onClick={() => { setShowDocs((v) => !v); setShowHistory(false); }}
             title="Documents indexés"
             className="relative flex flex-col items-center gap-1 group"
           >
@@ -297,6 +418,70 @@ export default function App() {
         </div>
       </nav>
 
+      {/* History Panel */}
+      <AnimatePresence>
+        {showHistory && (
+          <motion.aside
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 280, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            transition={{ ease: "easeInOut", duration: 0.3 }}
+            className="border-r border-[#E5E2DD] flex flex-col overflow-hidden shrink-0 bg-[#FDFCFA]"
+          >
+            <div className="flex items-center justify-between px-6 py-6 border-b border-[#E5E2DD]">
+              <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
+                Historique
+              </span>
+              <button
+                onClick={() => setShowHistory(false)}
+                className="text-[#CBC7C0] hover:text-black transition-colors"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-4 space-y-1">
+              {conversations.length === 0 ? (
+                <p className="text-[11px] text-[#CBC7C0] italic mt-4 px-2">
+                  Aucune conversation sauvegardée.
+                </p>
+              ) : (
+                conversations
+                  .slice()
+                  .sort((a, b) => b.updatedAt - a.updatedAt)
+                  .map((conv) => (
+                    <div
+                      key={conv.id}
+                      onClick={() => handleLoadConversation(conv)}
+                      className={`flex items-start justify-between gap-2 px-3 py-3 rounded-sm cursor-pointer group transition-colors ${
+                        currentConvId === conv.id
+                          ? "bg-[#F0EDE9]"
+                          : "hover:bg-[#F5F2EF]"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[12px] text-[#1A1A1A] truncate leading-snug">
+                          {conv.title}
+                        </p>
+                        <p className="text-[10px] text-[#CBC7C0] mt-1">
+                          {getModelLabel(conv.model)} · {formatDate(conv.updatedAt)}
+                        </p>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteConversation(conv.id); }}
+                        className="text-[#E5E2DD] hover:text-red-400 transition-colors shrink-0 opacity-0 group-hover:opacity-100 mt-0.5"
+                        title="Supprimer"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))
+              )}
+            </div>
+          </motion.aside>
+        )}
+      </AnimatePresence>
+
       {/* Main Chat */}
       <main className="flex-1 flex flex-col relative h-full min-w-0">
 
@@ -310,11 +495,22 @@ export default function App() {
                 className={`flex w-full ${message.role === "user" ? "justify-end" : "justify-start"}`}
               >
                 <div
-                  className={`max-w-2xl w-full ${message.role === "user" ? "text-right ml-auto" : "text-left mr-auto"}`}
+                  className={`max-w-2xl w-full group/msg ${message.role === "user" ? "text-right ml-auto" : "text-left mr-auto"}`}
                 >
-                  <p className="text-[10px] tracking-widest text-[#8C8C8C] mb-4 uppercase font-semibold">
-                    {message.role === "user" ? "Vous" : "L'Esprit"}
-                  </p>
+                  <div className="flex items-center justify-between mb-4">
+                    <p className="text-[10px] tracking-widest text-[#8C8C8C] uppercase font-semibold">
+                      {message.role === "user" ? "Vous" : "L'Esprit"}
+                    </p>
+                    {message.role === "model" && (
+                      <button
+                        onClick={() => handleExport(message.content)}
+                        title="Exporter en .txt"
+                        className="opacity-0 group-hover/msg:opacity-100 transition-opacity text-[#CBC7C0] hover:text-black"
+                      >
+                        <Download size={13} />
+                      </button>
+                    )}
+                  </div>
                   <div
                     className={`markdown-body ${message.role === "user" ? "text-2xl font-light leading-snug" : "text-lg leading-relaxed font-light"}`}
                   >

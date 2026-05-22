@@ -105,14 +105,27 @@ export async function getCorpusStats(): Promise<CorpusStats> {
   return response.json();
 }
 
-export async function indexCorpus(): Promise<IndexCorpusResponse> {
+export async function startIndexCorpus(): Promise<void> {
   const response = await fetch(`${API}/documents/index-corpus`, {
     method: "POST",
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail ?? "Erreur lors de l'indexation du corpus.");
+    throw new Error(err.detail ?? "Erreur lors du démarrage de l'indexation.");
   }
+}
+
+export interface IndexStatus {
+  running: boolean;
+  done: number;
+  total: number;
+  errors: number;
+  result: IndexCorpusResponse | null;
+}
+
+export async function getIndexStatus(): Promise<IndexStatus> {
+  const response = await fetch(`${API}/documents/index-corpus/status`);
+  if (!response.ok) throw new Error("Impossible de vérifier le statut.");
   return response.json();
 }
 

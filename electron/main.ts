@@ -121,7 +121,11 @@ function startBackend() {
     ? path.join(process.resourcesPath, 'server')
     : path.join(app.getAppPath(), 'server');
 
-  backendProcess = spawn('bash', ['start.sh'], {
+  const isWindows = process.platform === 'win32';
+  const command = isWindows ? 'cmd' : 'bash';
+  const args = isWindows ? ['/c', 'start.bat'] : ['start.sh'];
+
+  backendProcess = spawn(command, args, {
     cwd: serverDir,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
@@ -154,7 +158,7 @@ async function createWindow() {
   win.setMenuBarVisibility(false);
 
   if (isDev) {
-    await win.loadURL('http://localhost:3000');
+    await win.loadURL('http://localhost:5173');
     win.webContents.openDevTools();
   } else {
     await win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));

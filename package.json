@@ -13,6 +13,7 @@
   "main": "electron-dist/main.js",
   "scripts": {
     "dev": "vite --port=5173 --host=0.0.0.0",
+    "dev:backend": "cmd /c server\\start.bat",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist electron-dist release",
@@ -45,11 +46,13 @@
       }
     ],
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Utility"
     }
   },
-  "dependencies": {},
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.14",
     "@types/node": "^22.14.0",

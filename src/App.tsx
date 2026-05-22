@@ -13,7 +13,8 @@ import {
   listDocuments,
   deleteDocument,
   getCorpusStats,
-  indexCorpus,
+  startIndexCorpus,
+  getIndexStatus,
   listModels,
   type Document,
   type CorpusStats,
@@ -41,6 +42,7 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const indexPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [showDocs, setShowDocs] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -67,7 +69,10 @@ export default function App() {
   }, [messages]);
 
   useEffect(() => {
-    return () => abortControllerRef.current?.abort();
+    return () => {
+      abortControllerRef.current?.abort();
+      if (indexPollRef.current) clearInterval(indexPollRef.current);
+    };
   }, []);
 
   const loadDocuments = useCallback(async () => {
@@ -145,19 +150,37 @@ export default function App() {
   const handleIndexCorpus = async () => {
     setIndexingCorpus(true);
     setUploadError("");
-    setIndexMessage("");
+    setIndexMessage("Démarrage de l'indexation...");
     try {
-      const result = await indexCorpus();
-      await loadDocuments();
-      setIndexMessage(
-        `${result.indexed.length}/${result.files} fichiers indexes depuis SocrateCorpus.`,
-      );
-      if (result.errors.length > 0) {
-        setUploadError(`${result.errors.length} fichier(s) n'ont pas pu etre lus.`);
-      }
+      await startIndexCorpus();
+      indexPollRef.current = setInterval(async () => {
+        try {
+          const status = await getIndexStatus();
+          if (status.total > 0) {
+            setIndexMessage(`${status.done} / ${status.total} fichiers indexés...`);
+          }
+          if (!status.running) {
+            clearInterval(indexPollRef.current!);
+            indexPollRef.current = null;
+            setIndexingCorpus(false);
+            await loadDocuments();
+            if (status.result) {
+              setIndexMessage(
+                `${status.result.indexed.length} / ${status.result.files} fichiers indexés depuis SocrateCorpus.`,
+              );
+              if (status.result.errors.length > 0) {
+                setUploadError(`${status.result.errors.length} fichier(s) non lisibles.`);
+              }
+            }
+          }
+        } catch {
+          clearInterval(indexPollRef.current!);
+          indexPollRef.current = null;
+          setIndexingCorpus(false);
+        }
+      }, 2000);
     } catch (e: unknown) {
       setUploadError(e instanceof Error ? e.message : "Erreur inconnue.");
-    } finally {
       setIndexingCorpus(false);
     }
   };

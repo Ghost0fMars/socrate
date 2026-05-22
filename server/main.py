@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import pathlib
@@ -8,7 +9,7 @@ import chromadb
 import ollama
 import pypdf
 from docx import Document as DocxDocument
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
@@ -49,6 +50,30 @@ collection = chroma_client.get_or_create_collection(
     name="documents",
     metadata={"hnsw:space": "cosine"},
 )
+
+# Cache: {doc_id: source_name} — rebuilt on first access, invalidated on write.
+_doc_sources_cache: dict[str, str] | None = None
+
+# State of the background corpus indexation.
+_index_state: dict = {"running": False, "done": 0, "total": 0, "errors": 0, "result": None}
+
+
+def _get_doc_sources() -> dict[str, str]:
+    global _doc_sources_cache
+    if _doc_sources_cache is None:
+        all_meta = collection.get(include=["metadatas"])
+        seen: dict[str, str] = {}
+        for meta in all_meta["metadatas"]:
+            did = meta.get("doc_id", "")
+            if did and did not in seen:
+                seen[did] = meta.get("source", "")
+        _doc_sources_cache = seen
+    return _doc_sources_cache
+
+
+def _invalidate_cache() -> None:
+    global _doc_sources_cache
+    _doc_sources_cache = None
 
 
 class ChatMessage(BaseModel):
@@ -149,6 +174,7 @@ def index_text(
     collection.add(
         embeddings=embeddings, ids=ids, documents=documents, metadatas=metadatas
     )
+    _invalidate_cache()
 
     return {
         "id": doc_id,
@@ -162,28 +188,139 @@ def index_text(
 
 
 def get_embedding(text: str) -> list[float]:
-    response = ollama.embeddings(model=EMBED_MODEL, prompt=text)
-    return list(response["embedding"])
+    response = ollama.embed(model=EMBED_MODEL, input=text)
+    return response.embeddings[0]
 
 
-def retrieve_context(query: str, n_results: int = 6) -> str:
+_STOP_FR = {
+    "avec", "dans", "pour", "sur", "sous", "vers", "dont", "mais",
+    "quoi", "quel", "quels", "quelles", "cette", "cela", "leur",
+    "nous", "vous", "elles", "sont", "être", "avoir",
+}
+
+
+def _query_words(text: str) -> set[str]:
+    return {
+        w.strip("?.!,;:'\"()").lower()
+        for w in text.split()
+        if len(w) > 3
+    } - _STOP_FR
+
+
+def _find_boosted_doc_ids(query: str) -> dict[str, str]:
+    """Return {doc_id: source_name} for documents whose filename contains a query word."""
+    qwords = _query_words(query)
+    if not qwords:
+        return {}
+    boosted: dict[str, str] = {}
+    for doc_id, source in _get_doc_sources().items():
+        source_words = {
+            w.lower()
+            for w in source.replace("-", " ").replace(".", " ").replace("'", " ").split()
+            if len(w) > 3
+        } - _STOP_FR
+        if qwords & source_words:
+            boosted[doc_id] = source
+    return boosted
+
+
+def _format_chunk(doc: str, meta: dict) -> str:
+    source = meta.get("source", "Document")
+    category = meta.get("category", "")
+    chunk = meta.get("chunk", 0)
+    label = f"{category}/{source}" if category else source
+    return f"[source: {label} | extrait: {chunk}]\n{doc}"
+
+
+def retrieve_context(query: str, n_results: int = 15) -> str:
     if collection.count() == 0:
         return ""
     query_embedding = get_embedding(query)
+
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=min(n_results, collection.count()),
-        include=["documents", "metadatas"],
+        include=["documents", "metadatas", "distances"],
     )
-    if not results["documents"] or not results["documents"][0]:
+
+    seen: set[str] = set()
+    parts: list[str] = []
+
+    def collect(docs, metas, dists, max_dist: float = 0.6):
+        for doc, meta, dist in zip(docs, metas, dists):
+            key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+            if key in seen or dist > max_dist:
+                continue
+            seen.add(key)
+            parts.append(_format_chunk(doc, meta))
+
+    if results["documents"] and results["documents"][0]:
+        collect(results["documents"][0], results["metadatas"][0], results["distances"][0])
+
+    # Keyword boost: when the query names a specific source, prepend its best chunks.
+    boosted = _find_boosted_doc_ids(query)
+    for doc_id in boosted:
+        r = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(5, collection.count()),
+            where={"doc_id": doc_id},
+            include=["documents", "metadatas", "distances"],
+        )
+        if r["documents"] and r["documents"][0]:
+            # Insert boosted chunks at the front, skipping distance filter
+            boosted_parts = []
+            for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
+                key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                boosted_parts.append(_format_chunk(doc, meta))
+            parts[:0] = boosted_parts  # prepend
+
+    return "\n\n---\n\n".join(parts)
+
+
+# Keywords identifying the user's own writing — used for style reference.
+_STYLE_KEYWORDS = ("journal", "désir", "kubrick", "eyes wide", "mist", "darabont")
+
+
+def _is_style_source(source: str) -> bool:
+    s = source.lower()
+    return any(kw in s for kw in _STYLE_KEYWORDS)
+
+
+def retrieve_style_context(query: str, n_per_doc: int = 2) -> str:
+    """Return semantically close excerpts from the user's own writing for style calibration."""
+    if collection.count() == 0:
         return ""
-    parts = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        source = meta.get("source", "Document")
-        category = meta.get("category", "")
-        chunk = meta.get("chunk", 0)
-        label = f"{category}/{source}" if category else source
-        parts.append(f"[source: {label} | extrait: {chunk}]\n{doc}")
+    style_doc_ids = {
+        doc_id
+        for doc_id, source in _get_doc_sources().items()
+        if _is_style_source(source)
+    }
+    if not style_doc_ids:
+        return ""
+
+    query_embedding = get_embedding(query)
+    seen: set[str] = set()
+    parts: list[str] = []
+
+    for doc_id in style_doc_ids:
+        r = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(n_per_doc, collection.count()),
+            where={"doc_id": doc_id},
+            include=["documents", "metadatas"],
+        )
+        if not r["documents"] or not r["documents"][0]:
+            continue
+        for doc, meta in zip(r["documents"][0], r["metadatas"][0]):
+            key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(f"[{meta.get('source', 'Document')}]\n{doc}")
+
     return "\n\n---\n\n".join(parts)
 
 
@@ -195,27 +332,46 @@ def is_chat_model(name: str) -> bool:
 @app.post("/chat")
 async def chat(request: ChatRequest):
     context = retrieve_context(request.message) if request.use_corpus else ""
+    style_context = retrieve_style_context(request.message) if request.use_corpus else ""
     model = request.model or CHAT_MODEL
 
     system_prompt = (
-        "Tu es Socrate, un compagnon d'ecriture et de recherche local. "
-        "Tu aides l'utilisateur a penser, structurer, problematiser, reformuler "
-        "et developper ses travaux. Reponds en francais avec precision, sobriete "
-        "et une vraie attention au geste d'ecriture."
+        "Tu es un directeur de recherche universitaire spécialisé en théorie de l'art, "
+        "de l'écriture narrative et de la représentation. "
+        "Tu connais intimement les travaux de cet étudiant — tu as lu ses textes, "
+        "ses scénarios, son journal. Tu travailles depuis son corpus et depuis sa propre écriture.\n\n"
+        "Ton approche :\n"
+        "— Tu poses des questions qui déstabilisent les certitudes sans les détruire.\n"
+        "— Tu exiges que chaque affirmation soit étayée, chaque concept défini avec précision.\n"
+        "— Tu identifies les glissements conceptuels, les contradictions, "
+        "les raccourcis intellectuels non justifiés.\n"
+        "— Tu proposes des pistes depuis le corpus quand c'est pertinent, "
+        "avec la référence exacte entre crochets.\n"
+        "— Tu reconnais la voix de cet étudiant et tu t'y accordes — "
+        "tu adoptes son registre, son rythme, sa façon d'articuler les idées.\n"
+        "— Tu ne flattes pas. Tu stimules. Tu exiges.\n\n"
+        "Réponds en français. Sois précis, exigeant, et intellectuellement stimulant."
     )
+
+    if style_context:
+        system_prompt += (
+            "\n\nExtraits de l'écriture de cet étudiant — "
+            "calibre ta voix sur la sienne :\n\n"
+            + style_context
+        )
+
     if context:
         system_prompt += (
-            "\n\nCorpus de recherche indexe. Utilise ces extraits seulement s'ils sont "
-            "pertinents. Quand une idee vient du corpus, cite la source entre crochets "
-            "avec le nom du fichier. Si le corpus ne suffit pas, dis-le clairement et "
-            "propose une piste de travail sans inventer de reference.\n\n"
+            "\n\nCorpus de recherche. Utilise ces extraits seulement s'ils sont pertinents. "
+            "Cite la source entre crochets avec le nom du fichier. "
+            "Si le corpus est insuffisant, dis-le et propose une piste sans inventer de référence.\n\n"
             + context
         )
     else:
         system_prompt += (
-            "\n\nAucun extrait de corpus pertinent n'est disponible pour cette requete. "
-            "Tu peux aider a raisonner et a ecrire, mais ne pretend pas t'appuyer sur "
-            "des documents indexes."
+            "\n\nAucun extrait de corpus pertinent pour cette requête. "
+            "Tu peux aider à raisonner et à problématiser, "
+            "mais ne te réfère pas à des documents non indexés."
         )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -262,42 +418,78 @@ async def upload_document(file: UploadFile = File(...)):
     return index_text(filename=filename, text=text)
 
 
-@app.post("/documents/index-corpus")
-async def index_corpus():
-    if not CORPUS_PATH.exists():
-        raise HTTPException(
-            status_code=404, detail=f"Dossier corpus introuvable: {CORPUS_PATH}"
-        )
+async def _run_index_corpus() -> None:
+    global _index_state
+    _index_state = {"running": True, "done": 0, "total": 0, "errors": 0, "result": None}
 
-    files = sorted(
-        path
-        for path in CORPUS_PATH.rglob("*")
-        if path.is_file() and path.suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
+    if not CORPUS_PATH.exists():
+        _index_state["running"] = False
+        _index_state["result"] = {
+            "path": str(CORPUS_PATH), "files": 0, "indexed": [], "errors": []
+        }
+        return
+
+    all_files = sorted(
+        p for p in CORPUS_PATH.rglob("*")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
     )
 
-    indexed = []
-    errors = []
+    # Skip paths already indexed to allow incremental runs.
+    if collection.count() > 0:
+        indexed_paths = {
+            m.get("path", "")
+            for m in collection.get(include=["metadatas"])["metadatas"]
+        }
+        files = [f for f in all_files if str(f) not in indexed_paths]
+    else:
+        files = all_files
+
+    _index_state["total"] = len(files)
+    indexed: list[dict] = []
+    errors: list[dict] = []
+
     for path in files:
         try:
             content = path.read_bytes()
             text = extract_text(path.name, content)
-            indexed.append(
-                index_text(
-                    filename=path.name,
-                    text=text,
-                    path=path,
-                    category=get_corpus_category(path),
-                )
+            # Run blocking work in thread so the event loop stays responsive.
+            result = await asyncio.to_thread(
+                index_text,
+                filename=path.name,
+                text=text,
+                path=path,
+                category=get_corpus_category(path),
             )
+            indexed.append({"name": result["name"], "chunks": result["chunks"]})
         except Exception as exc:
             errors.append({"path": str(path), "error": str(exc)})
+            _index_state["errors"] += 1
+        _index_state["done"] += 1
 
-    return {
+    _index_state["running"] = False
+    _index_state["result"] = {
         "path": str(CORPUS_PATH),
-        "files": len(files),
+        "files": len(all_files),
         "indexed": indexed,
         "errors": errors,
     }
+
+
+@app.post("/documents/index-corpus")
+async def index_corpus(background_tasks: BackgroundTasks):
+    if _index_state.get("running"):
+        raise HTTPException(status_code=409, detail="Indexation déjà en cours.")
+    if not CORPUS_PATH.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Dossier corpus introuvable: {CORPUS_PATH}"
+        )
+    background_tasks.add_task(_run_index_corpus)
+    return {"status": "started"}
+
+
+@app.get("/documents/index-corpus/status")
+async def index_corpus_status():
+    return _index_state
 
 
 @app.get("/documents")
@@ -337,4 +529,5 @@ async def delete_document(doc_id: str):
     if not results["ids"]:
         raise HTTPException(status_code=404, detail="Document non trouve.")
     collection.delete(ids=results["ids"])
+    _invalidate_cache()
     return {"deleted": doc_id}

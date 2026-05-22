@@ -434,13 +434,27 @@ async def _run_index_corpus() -> None:
         if p.is_file() and p.suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
     )
 
-    # Skip paths already indexed to allow incremental runs.
+    # Skip paths already indexed and unmodified since last indexation.
     if collection.count() > 0:
-        indexed_paths = {
-            m.get("path", "")
-            for m in collection.get(include=["metadatas"])["metadatas"]
-        }
-        files = [f for f in all_files if str(f) not in indexed_paths]
+        path_to_indexed_at: dict[str, str] = {}
+        for m in collection.get(include=["metadatas"])["metadatas"]:
+            p = m.get("path", "")
+            if p and p not in path_to_indexed_at:
+                path_to_indexed_at[p] = m.get("indexed_at", "")
+
+        files = []
+        for f in all_files:
+            path_str = str(f)
+            if path_str not in path_to_indexed_at:
+                files.append(f)
+            else:
+                try:
+                    indexed_at = datetime.fromisoformat(path_to_indexed_at[path_str])
+                    file_mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+                    if file_mtime > indexed_at:
+                        files.append(f)
+                except (ValueError, OSError):
+                    files.append(f)
     else:
         files = all_files
 

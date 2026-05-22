@@ -58,7 +58,7 @@
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.4",
     "autoprefixer": "^10.4.21",
-    "cross-env": "^10.1.0",
+    "cross-env": "^7.0.3",
     "electron": "^36.9.5",
     "electron-builder": "^26.8.1",
     "lucide-react": "^0.546.0",

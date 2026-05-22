@@ -123,7 +123,7 @@ function startBackend() {
 
   const isWindows = process.platform === 'win32';
   const command = isWindows ? 'cmd' : 'bash';
-  const args = isWindows ? ['/c', 'start.bat'] : ['start.sh'];
+  const args = isWindows ? ['/c', 'call', 'start.bat'] : ['start.sh'];
 
   backendProcess = spawn(command, args, {
     cwd: serverDir,

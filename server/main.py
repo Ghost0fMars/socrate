@@ -9,11 +9,17 @@ import chromadb
 import ollama
 import pypdf
 from docx import Document as DocxDocument
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+
+_ENV_LOCAL = pathlib.Path(__file__).parent.parent / ".env.local"
+if _ENV_LOCAL.exists():
+    load_dotenv(_ENV_LOCAL, override=False)
 
 app = FastAPI()
 
@@ -26,6 +32,12 @@ app.add_middleware(
 
 CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+_openai_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+_OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "text-davinci")
 CORPUS_PATH = pathlib.Path(
     os.getenv(
         "SOCRATE_CORPUS_PATH",
@@ -380,34 +392,58 @@ async def chat(request: ChatRequest):
         messages.append({"role": role, "content": msg.content})
     messages.append({"role": "user", "content": request.message})
 
+    def _is_openai_model(name: str) -> bool:
+        return name.lower().startswith(_OPENAI_PREFIXES)
+
     async def generate():
-        async for chunk in await AsyncClient().chat(
-            model=model, messages=messages, stream=True
-        ):
-            content = chunk.message.content
-            if content:
-                yield content
+        if _is_openai_model(model) and _openai_client:
+            async with await _openai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+            ) as stream:
+                async for chunk in stream:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield content
+        else:
+            async for chunk in await AsyncClient().chat(
+                model=model, messages=messages, stream=True
+            ):
+                content = chunk.message.content
+                if content:
+                    yield content
 
     return StreamingResponse(generate(), media_type="text/plain")
 
 
 @app.get("/models")
 async def list_models():
-    response = ollama.list()
-    models = response.get("models", [])
-    return {
-        "default": CHAT_MODEL,
-        "models": [
-            {
-                "name": model.get("name") or model.get("model", ""),
-                "size": model.get("size", 0),
-                "modified_at": str(model.get("modified_at", "")),
-            }
-            for model in models
-            if (model.get("name") or model.get("model"))
-            and is_chat_model(model.get("name") or model.get("model", ""))
-        ],
-    }
+    result_models = []
+
+    if _openai_client:
+        result_models.append({
+            "name": OPENAI_MODEL,
+            "size": 0,
+            "modified_at": "",
+        })
+
+    try:
+        response = ollama.list()
+        ollama_models = response.get("models", [])
+        for model in ollama_models:
+            name = model.get("name") or model.get("model", "")
+            if name and is_chat_model(name):
+                result_models.append({
+                    "name": name,
+                    "size": model.get("size", 0),
+                    "modified_at": str(model.get("modified_at", "")),
+                })
+    except Exception:
+        pass
+
+    default = OPENAI_MODEL if _openai_client else CHAT_MODEL
+    return {"default": default, "models": result_models}
 
 
 @app.post("/documents/upload")

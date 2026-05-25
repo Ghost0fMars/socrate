@@ -23,7 +23,17 @@ app.add_middleware(
 )
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# Correct common model ID typos (e.g. "gpt-o4-mini" → "o4-mini")
+_RAW_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+_MODEL_FIXES = {
+    "gpt-o4-mini": "o4-mini",
+    "gpt-o3-mini": "o3-mini",
+    "gpt-o3": "o3",
+    "gpt-o1-mini": "o1-mini",
+    "gpt-o1": "o1",
+}
+OPENAI_MODEL = _MODEL_FIXES.get(_RAW_MODEL, _RAW_MODEL)
 
 # _client is None when key is missing; routes return 503 instead of crashing.
 _client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -76,15 +86,15 @@ async def _chat_handler(request: ChatRequest):
     messages.append({"role": "user", "content": request.message})
 
     async def generate():
-        async with await _client.chat.completions.create(
+        stream = await _client.chat.completions.create(
             model=model,
             messages=messages,
             stream=True,
-        ) as stream:
-            async for chunk in stream:
-                content = chunk.choices[0].delta.content
-                if content:
-                    yield content
+        )
+        async for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
 
     return StreamingResponse(generate(), media_type="text/plain")
 

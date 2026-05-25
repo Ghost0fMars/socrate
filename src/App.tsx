@@ -50,8 +50,18 @@ function persistConversations(convs: Conversation[]) {
 }
 
 const MODEL_LABELS: Record<string, string> = {
+  // Modèles locaux (Ollama)
   "qwen3:14b": "Reflexion",
   "gemma3:12b": "Fiction",
+  // Modèles OpenAI en ligne
+  "o4-mini": "OpenAI o4-mini",
+  "o3-mini": "OpenAI o3-mini",
+  "o3": "OpenAI o3",
+  "gpt-4o": "GPT-4o",
+  "gpt-4o-mini": "GPT-4o mini",
+  "gpt-4.1": "GPT-4.1",
+  "gpt-4.1-mini": "GPT-4.1 mini",
+  "gpt-4.1-nano": "GPT-4.1 nano",
 };
 
 const getModelLabel = (name: string) => MODEL_LABELS[name] ?? name;
@@ -333,7 +343,9 @@ export default function App() {
           id: "error",
           role: "model",
           content:
-            "Une erreur est survenue. Vérifiez que le serveur local est démarré.",
+            window.location.protocol === 'file:'
+              ? "Une erreur est survenue. Vérifiez que le serveur local est démarré."
+              : "Une erreur est survenue. L'API est momentanément indisponible.",
         },
       ]);
     } finally {

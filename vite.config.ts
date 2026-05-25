@@ -3,9 +3,10 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-export default defineConfig(({ command }) => {
+export default defineConfig(() => {
+  const isElectron = process.env.ELECTRON_BUILD === 'true';
   return {
-    base: command === 'build' ? './' : '/',
+    base: isElectron ? './' : '/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

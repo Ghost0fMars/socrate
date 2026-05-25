@@ -1,4 +1,9 @@
-const API = import.meta.env.VITE_API_URL ?? '/api';
+// Electron packaged apps load from file://, so absolute /api paths don't resolve.
+// On Vercel (https://) or dev (http://), /api routes to the serverless function or proxy.
+const API =
+  window.location.protocol === 'file:'
+    ? (import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
+    : '/api';
 
 interface HistoryEntry {
   role: string;

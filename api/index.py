@@ -7,29 +7,14 @@ _env = pathlib.Path(__file__).parent.parent / ".env.local"
 if _env.exists():
     load_dotenv(_env, override=False)
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 app = FastAPI()
 
-
-class _StripApiPrefix(BaseHTTPMiddleware):
-    """Vercel passes the full path (/api/chat) to the ASGI app; strip the prefix."""
-    async def dispatch(self, request: Request, call_next):
-        path = request.scope.get("path", "")
-        if path.startswith("/api"):
-            stripped = path[4:] or "/"
-            request.scope["path"] = stripped
-            request.scope["raw_path"] = stripped.encode()
-        return await call_next(request)
-
-
-app.add_middleware(_StripApiPrefix)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,10 +25,8 @@ app.add_middleware(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is not set")
-
-_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+# _client is None when key is missing; routes return 503 instead of crashing.
+_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 _SYSTEM_PROMPT = (
     "Tu es un directeur de recherche universitaire spécialisé en théorie de l'art, "
@@ -79,8 +62,12 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
-@app.post("/chat")
-async def chat(request: ChatRequest):
+async def _chat_handler(request: ChatRequest):
+    if not _client:
+        return JSONResponse(
+            {"detail": "OPENAI_API_KEY not configured on this server."},
+            status_code=503,
+        )
     model = request.model or OPENAI_MODEL
     messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
     for msg in request.history:
@@ -102,9 +89,25 @@ async def chat(request: ChatRequest):
     return StreamingResponse(generate(), media_type="text/plain")
 
 
-@app.get("/models")
-async def list_models():
+def _models_response():
+    if not _client:
+        return {"default": "", "models": []}
     return {
         "default": OPENAI_MODEL,
         "models": [{"name": OPENAI_MODEL, "size": 0, "modified_at": ""}],
     }
+
+
+# Vercel may pass the full path (/api/chat) or strip the prefix (/chat).
+# Both are handled explicitly to avoid any middleware path-stripping issues.
+
+@app.post("/chat")
+@app.post("/api/chat")
+async def chat(request: ChatRequest):
+    return await _chat_handler(request)
+
+
+@app.get("/models")
+@app.get("/api/models")
+async def list_models():
+    return _models_response()

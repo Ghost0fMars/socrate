@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -16,6 +16,7 @@ import {
   startIndexCorpus,
   getIndexStatus,
   listModels,
+  getDocumentContent,
   type Document,
   type CorpusStats,
   type ModelInfo,
@@ -95,6 +96,15 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
 
+  const [viewingDoc, setViewingDoc] = useState<Document | null>(null);
+  const [docContent, setDocContent] = useState("");
+  const [docContentLoading, setDocContentLoading] = useState(false);
+  const [docMessages, setDocMessages] = useState<Message[]>([]);
+  const [docInput, setDocInput] = useState("");
+  const [docLoading, setDocLoading] = useState(false);
+  const docScrollRef = useRef<HTMLDivElement>(null);
+  const docAbortControllerRef = useRef<AbortController | null>(null);
+
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("fr-FR").format(value);
 
@@ -107,9 +117,16 @@ export default function App() {
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
+      docAbortControllerRef.current?.abort();
       if (indexPollRef.current) clearInterval(indexPollRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (docScrollRef.current) {
+      docScrollRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [docMessages]);
 
   // Auto-save current conversation when messages change
   useEffect(() => {
@@ -283,6 +300,81 @@ export default function App() {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsLoading(false);
+  };
+
+  const handleViewDoc = async (doc: Document) => {
+    setViewingDoc(doc);
+    setDocContent("");
+    setDocMessages([]);
+    setDocInput("");
+    setDocContentLoading(true);
+    try {
+      const result = await getDocumentContent(doc.id);
+      setDocContent(result.content);
+    } catch {
+      setDocContent("Erreur lors du chargement du contenu.");
+    } finally {
+      setDocContentLoading(false);
+    }
+  };
+
+  const handleDocStop = () => {
+    docAbortControllerRef.current?.abort();
+    docAbortControllerRef.current = null;
+    setDocLoading(false);
+  };
+
+  const handleDocQuestion = async (e?: React.SyntheticEvent<HTMLFormElement>) => {
+    if (e) e.preventDefault();
+    if (!docInput.trim() || docLoading || !viewingDoc) return;
+
+    const question = docInput;
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: question,
+    };
+    setDocMessages((prev) => [...prev, userMessage]);
+    setDocInput("");
+    setDocLoading(true);
+
+    const botMessageId = (Date.now() + 1).toString();
+    const abortController = new AbortController();
+    docAbortControllerRef.current = abortController;
+    const history = docMessages.map((m) => ({ role: m.role, content: m.content }));
+
+    try {
+      let accumulated = "";
+      const stream = sendMessageStream(
+        question,
+        history,
+        true,
+        selectedModel,
+        abortController.signal,
+        viewingDoc.id,
+      );
+      for await (const chunk of stream) {
+        accumulated += chunk;
+        setDocMessages((prev) => {
+          const exists = prev.find((m) => m.id === botMessageId);
+          if (exists) {
+            return prev.map((m) => m.id === botMessageId ? { ...m, content: accumulated } : m);
+          }
+          return [...prev, { id: botMessageId, role: "model", content: accumulated }];
+        });
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setDocMessages((prev) => [
+        ...prev,
+        { id: "doc-error", role: "model", content: "Une erreur est survenue." },
+      ]);
+    } finally {
+      if (docAbortControllerRef.current === abortController) {
+        docAbortControllerRef.current = null;
+      }
+      setDocLoading(false);
+    }
   };
 
   const handleSubmit = async (e?: React.SyntheticEvent<HTMLFormElement>) => {
@@ -717,7 +809,10 @@ export default function App() {
                     key={doc.id}
                     className="flex items-center justify-between gap-2 py-3 border-b border-[#F0EDE9] group"
                   >
-                    <div className="flex items-start gap-2 min-w-0">
+                    <div
+                      className="flex items-start gap-2 min-w-0 flex-1 cursor-pointer"
+                      onClick={() => handleViewDoc(doc)}
+                    >
                       <FileText
                         size={12}
                         className="text-[#CBC7C0] shrink-0 mt-1"
@@ -736,18 +831,140 @@ export default function App() {
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleDeleteDoc(doc.id)}
-                      className="text-[#E5E2DD] hover:text-red-400 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
-                      title="Supprimer"
-                    >
-                      <Trash2 size={12} />
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => handleViewDoc(doc)}
+                        className="text-[#CBC7C0] hover:text-black transition-colors"
+                        title="Lire"
+                      >
+                        <Eye size={12} />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteDoc(doc.id)}
+                        className="text-[#E5E2DD] hover:text-red-400 transition-colors"
+                        title="Supprimer"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
             </div>
           </motion.aside>
+        )}
+      </AnimatePresence>
+      {/* Document Reader Modal */}
+      <AnimatePresence>
+        {viewingDoc && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-50 bg-[#FDFCFA] flex flex-col"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-8 py-5 border-b border-[#E5E2DD] shrink-0">
+              <div>
+                <p className="text-[9px] tracking-[0.3em] font-semibold text-[#CBC7C0] uppercase mb-1">
+                  Lecture
+                </p>
+                <h2 className="text-sm font-medium text-[#1A1A1A]">{viewingDoc.name}</h2>
+              </div>
+              <button
+                onClick={() => {
+                  docAbortControllerRef.current?.abort();
+                  setViewingDoc(null);
+                  setDocContent("");
+                  setDocMessages([]);
+                  setDocLoading(false);
+                }}
+                className="text-[#CBC7C0] hover:text-black transition-colors"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Two-pane layout */}
+            <div className="flex flex-1 overflow-hidden">
+              {/* Left: document text */}
+              <div className="flex-1 overflow-y-auto no-scrollbar px-12 py-12 border-r border-[#E5E2DD]">
+                {docContentLoading ? (
+                  <div className="flex items-center justify-center h-full">
+                    <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
+                  </div>
+                ) : (
+                  <div className="max-w-2xl mx-auto">
+                    <p className="text-[13px] font-light leading-relaxed text-[#1A1A1A] whitespace-pre-wrap">
+                      {docContent}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Right: inline AI conversation */}
+              <div className="w-96 flex flex-col shrink-0">
+                <div className="px-5 py-4 border-b border-[#E5E2DD] shrink-0">
+                  <p className="text-[9px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
+                    Dialogue
+                  </p>
+                </div>
+
+                <div className="flex-1 overflow-y-auto no-scrollbar px-5 py-5 space-y-8">
+                  {docMessages.length === 0 ? (
+                    <p className="text-[11px] text-[#CBC7C0] italic mt-4">
+                      Posez une question sur ce texte.
+                    </p>
+                  ) : (
+                    docMessages.map((msg) => (
+                      <div
+                        key={msg.id}
+                        className={`flex w-full ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                      >
+                        <div className={`max-w-[90%] ${msg.role === "user" ? "text-right" : "text-left"}`}>
+                          <p className="text-[9px] tracking-widest text-[#8C8C8C] uppercase font-semibold mb-2">
+                            {msg.role === "user" ? "Vous" : "L'Esprit"}
+                          </p>
+                          <div className="text-[13px] leading-relaxed font-light text-[#1A1A1A]">
+                            {msg.role === "user" ? (
+                              <span>{msg.content}</span>
+                            ) : (
+                              <Markdown>{msg.content}</Markdown>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  <div ref={docScrollRef} />
+                </div>
+
+                <div className="px-5 py-4 border-t border-[#E5E2DD] shrink-0">
+                  <form onSubmit={handleDocQuestion} className="flex items-center gap-3">
+                    <input
+                      type="text"
+                      value={docInput}
+                      onChange={(e) => setDocInput(e.target.value)}
+                      placeholder="Question sur ce texte..."
+                      disabled={docLoading}
+                      className="flex-1 bg-transparent text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
+                    />
+                    <button
+                      type={docLoading ? "button" : "submit"}
+                      onClick={docLoading ? handleDocStop : undefined}
+                      disabled={!docLoading && !docInput.trim()}
+                      className={`text-[10px] tracking-[0.18em] font-bold transition-colors disabled:opacity-20 uppercase whitespace-nowrap ${
+                        docLoading ? "text-red-400 hover:text-red-500" : "text-[#8C8C8C] hover:text-black"
+                      }`}
+                    >
+                      {docLoading ? "STOP" : "ENVOYER"}
+                    </button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

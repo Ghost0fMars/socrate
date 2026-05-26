@@ -16,6 +16,7 @@ export async function* sendMessageStream(
   useCorpus = true,
   model?: string,
   signal?: AbortSignal,
+  docId?: string,
 ) {
   const messages = history.map((m) => ({
     role: m.role === "model" ? "assistant" : m.role,
@@ -30,6 +31,7 @@ export async function* sendMessageStream(
       history: messages,
       use_corpus: useCorpus,
       model,
+      doc_id: docId ?? null,
     }),
     signal,
   });
@@ -143,4 +145,18 @@ export async function listModels(): Promise<ModelsResponse> {
 export async function deleteDocument(id: string): Promise<void> {
   const response = await fetch(`${API}/documents/${id}`, { method: "DELETE" });
   if (!response.ok) throw new Error("Impossible de supprimer le document.");
+}
+
+export interface DocumentContent {
+  id: string;
+  name: string;
+  content: string;
+  word_count: number;
+  chunks: number;
+}
+
+export async function getDocumentContent(id: string): Promise<DocumentContent> {
+  const response = await fetch(`${API}/documents/${id}/content`);
+  if (!response.ok) throw new Error("Impossible de charger le contenu du document.");
+  return response.json();
 }

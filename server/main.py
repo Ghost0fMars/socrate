@@ -98,6 +98,7 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
     use_corpus: bool = True
     model: str | None = None
+    doc_id: str | None = None
 
 
 def chunk_text(text: str, chunk_size: int = 360, overlap: int = 60) -> list[str]:
@@ -301,6 +302,28 @@ def _is_style_source(source: str) -> bool:
     return any(kw in s for kw in _STYLE_KEYWORDS)
 
 
+def retrieve_context_for_doc(doc_id: str, query: str, n_results: int = 10) -> str:
+    """Retrieve context restricted to a single document."""
+    if collection.count() == 0:
+        return ""
+    query_embedding = get_embedding(query)
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=min(n_results, collection.count()),
+        where={"doc_id": doc_id},
+        include=["documents", "metadatas", "distances"],
+    )
+    if not results["documents"] or not results["documents"][0]:
+        return ""
+    parts = []
+    for doc, meta, dist in zip(
+        results["documents"][0], results["metadatas"][0], results["distances"][0]
+    ):
+        if dist <= 0.75:
+            parts.append(_format_chunk(doc, meta))
+    return "\n\n---\n\n".join(parts)
+
+
 def retrieve_style_context(query: str, n_per_doc: int = 2) -> str:
     """Return semantically close excerpts from the user's own writing for style calibration."""
     if collection.count() == 0:
@@ -343,8 +366,15 @@ def is_chat_model(name: str) -> bool:
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    context = retrieve_context(request.message) if request.use_corpus else ""
-    style_context = retrieve_style_context(request.message) if request.use_corpus else ""
+    if request.doc_id:
+        context = retrieve_context_for_doc(request.doc_id, request.message)
+        style_context = ""
+    elif request.use_corpus:
+        context = retrieve_context(request.message)
+        style_context = retrieve_style_context(request.message)
+    else:
+        context = ""
+        style_context = ""
     model = request.model or CHAT_MODEL
 
     system_prompt = (
@@ -570,6 +600,36 @@ async def document_stats():
         "documents": len(docs),
         "chunks": sum(int(doc.get("chunks") or 0) for doc in docs),
         "words": sum(int(doc.get("word_count") or 0) for doc in docs),
+    }
+
+
+@app.get("/documents/{doc_id}/content")
+async def get_document_content(doc_id: str):
+    results = collection.get(
+        where={"doc_id": doc_id},
+        include=["documents", "metadatas"],
+    )
+    if not results["ids"]:
+        raise HTTPException(status_code=404, detail="Document non trouvé.")
+
+    pairs = sorted(
+        zip(results["documents"], results["metadatas"]),
+        key=lambda x: x[1].get("chunk", 0),
+    )
+
+    OVERLAP = 60
+    words: list[str] = []
+    for i, (doc, _) in enumerate(pairs):
+        chunk_words = doc.split()
+        words.extend(chunk_words if i == 0 else chunk_words[OVERLAP:])
+
+    first_meta = pairs[0][1]
+    return {
+        "id": doc_id,
+        "name": first_meta.get("source", "Document"),
+        "content": " ".join(words),
+        "word_count": first_meta.get("word_count", len(words)),
+        "chunks": len(pairs),
     }
 
 

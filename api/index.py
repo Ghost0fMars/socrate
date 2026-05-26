@@ -9,7 +9,7 @@ if _env.exists():
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
@@ -85,18 +85,13 @@ async def _chat_handler(request: ChatRequest):
         messages.append({"role": role, "content": msg.content})
     messages.append({"role": "user", "content": request.message})
 
-    async def generate():
-        stream = await _client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
-        )
-        async for chunk in stream:
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
-
-    return StreamingResponse(generate(), media_type="text/plain")
+    response = await _client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=False,
+    )
+    content = response.choices[0].message.content or ""
+    return PlainTextResponse(content)
 
 
 def _models_response():

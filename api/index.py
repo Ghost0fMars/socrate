@@ -87,13 +87,16 @@ async def _chat_handler(request: ChatRequest):
         messages.append({"role": role, "content": msg.content})
     messages.append({"role": "user", "content": request.message})
 
-    response = await _client.chat.completions.create(
-        model=model,
-        messages=messages,
-        stream=False,
-    )
-    content = response.choices[0].message.content or ""
-    return PlainTextResponse(content)
+    try:
+        response = await _client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=False,
+        )
+        content = response.choices[0].message.content or ""
+        return PlainTextResponse(content)
+    except Exception as e:
+        return JSONResponse({"detail": f"[DEBUG] {type(e).__name__}: {e}"}, status_code=500)
 
 
 def _models_response():

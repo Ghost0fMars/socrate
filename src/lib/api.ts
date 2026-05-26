@@ -36,7 +36,10 @@ export async function* sendMessageStream(
     signal,
   });
 
-  if (!response.ok) throw new Error(`Erreur serveur : ${response.status}`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail ?? `Erreur serveur : ${response.status}`);
+  }
   if (!response.body) throw new Error("Pas de réponse du serveur.");
 
   const reader = response.body.getReader();

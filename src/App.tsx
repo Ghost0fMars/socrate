@@ -745,66 +745,59 @@ export default function App() {
 
             {/* Upload zone */}
             <div className="px-6 py-5 border-b border-[#E5E2DD]">
-              {isOnline ? (
-                <p className="text-[11px] text-[#CBC7C0] italic text-center py-4">
-                  L'indexation de documents n'est pas disponible en ligne.<br />
-                  Utilisez l'application locale.
-                </p>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={handleIndexCorpus}
-                    disabled={indexingCorpus || uploading}
-                    className="mb-4 flex h-8 w-full items-center justify-center gap-2 border border-[#E5E2DD] text-[10px] font-semibold uppercase tracking-widest text-[#8C8C8C] transition-colors hover:border-[#CBC7C0] hover:text-black disabled:opacity-30"
-                  >
-                    {indexingCorpus ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <BookOpen size={12} />
-                    )}
-                    {indexingCorpus ? "Indexation du dossier..." : "Indexer SocrateCorpus"}
-                  </button>
-                  <div
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDragOver(true);
-                    }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={handleDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`flex flex-col items-center justify-center gap-3 border border-dashed rounded-sm py-7 cursor-pointer transition-colors ${
-                      dragOver
-                        ? "border-black bg-[#F5F2EF]"
-                        : "border-[#E5E2DD] hover:border-[#CBC7C0]"
-                    }`}
-                  >
-                    {uploading ? (
-                      <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
-                    ) : (
-                      <UploadCloud size={20} className="text-[#CBC7C0]" />
-                    )}
-                    <span className="text-[11px] tracking-widest text-[#8C8C8C] uppercase font-semibold">
-                      {uploading ? "Indexation..." : "Déposer un fichier"}
-                    </span>
-                    <span className="text-[10px] text-[#CBC7C0]">
-                      PDF / DOCX / TXT / MD
-                    </span>
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".pdf,.docx,.txt,.md"
-                    className="hidden"
-                    onChange={handleFileInput}
-                  />
-                  {uploadError && (
-                    <p className="mt-3 text-[11px] text-red-400">{uploadError}</p>
+              {!isOnline && (
+                <button
+                  type="button"
+                  onClick={handleIndexCorpus}
+                  disabled={indexingCorpus || uploading}
+                  className="mb-4 flex h-8 w-full items-center justify-center gap-2 border border-[#E5E2DD] text-[10px] font-semibold uppercase tracking-widest text-[#8C8C8C] transition-colors hover:border-[#CBC7C0] hover:text-black disabled:opacity-30"
+                >
+                  {indexingCorpus ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <BookOpen size={12} />
                   )}
-                  {indexMessage && (
-                    <p className="mt-3 text-[11px] text-[#8C8C8C]">{indexMessage}</p>
-                  )}
-                </>
+                  {indexingCorpus ? "Indexation du dossier..." : "Indexer SocrateCorpus"}
+                </button>
+              )}
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`flex flex-col items-center justify-center gap-3 border border-dashed rounded-sm py-7 cursor-pointer transition-colors ${
+                  dragOver
+                    ? "border-black bg-[#F5F2EF]"
+                    : "border-[#E5E2DD] hover:border-[#CBC7C0]"
+                }`}
+              >
+                {uploading ? (
+                  <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
+                ) : (
+                  <UploadCloud size={20} className="text-[#CBC7C0]" />
+                )}
+                <span className="text-[11px] tracking-widest text-[#8C8C8C] uppercase font-semibold">
+                  {uploading ? "Indexation..." : "Déposer un fichier"}
+                </span>
+                <span className="text-[10px] text-[#CBC7C0]">
+                  PDF / DOCX / TXT / MD
+                </span>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.docx,.txt,.md"
+                className="hidden"
+                onChange={handleFileInput}
+              />
+              {uploadError && (
+                <p className="mt-3 text-[11px] text-red-400">{uploadError}</p>
+              )}
+              {indexMessage && (
+                <p className="mt-3 text-[11px] text-[#8C8C8C]">{indexMessage}</p>
               )}
             </div>
 

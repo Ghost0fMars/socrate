@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import os
 import pathlib
+import uuid
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -9,7 +12,9 @@ _env = pathlib.Path(__file__).parent.parent / ".env.local"
 if _env.exists():
     load_dotenv(_env, override=False)
 
-from fastapi import FastAPI
+import pypdf
+from docx import Document as DocxDocument
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from openai import AsyncOpenAI
@@ -25,8 +30,9 @@ app.add_middleware(
 )
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+QDRANT_URL = os.getenv("QDRANT_URL", "")
+QDRANT_API_KEY_VAR = os.getenv("QDRANT_API_KEY", "")
 
-# Correct common model ID typos (e.g. "gpt-o4-mini" → "o4-mini")
 _RAW_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 _MODEL_FIXES = {
     "gpt-o4-mini": "o4-mini",
@@ -36,9 +42,10 @@ _MODEL_FIXES = {
     "gpt-o1": "o1",
 }
 OPENAI_MODEL = _MODEL_FIXES.get(_RAW_MODEL, _RAW_MODEL)
+EMBED_MODEL = "text-embedding-3-small"
+VECTOR_SIZE = 1536
 
-# _client is None when key is missing; routes return 503 instead of crashing.
-_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 _SYSTEM_PROMPT = (
     "Tu es un directeur de recherche universitaire spécialisé en théorie de l'art, "
@@ -55,11 +62,102 @@ _SYSTEM_PROMPT = (
     "— Tu reconnais la voix de cet étudiant et tu t'y accordes — "
     "tu adoptes son registre, son rythme, sa façon d'articuler les idées.\n"
     "— Tu ne flattes pas. Tu stimules. Tu exiges.\n\n"
-    "Réponds en français. Sois précis, exigeant, et intellectuellement stimulant.\n\n"
-    "Aucun corpus local disponible dans cette session. "
-    "Tu peux aider à raisonner et à problématiser, "
-    "mais ne te réfère pas à des documents non indexés."
+    "Réponds en français. Sois précis, exigeant, et intellectuellement stimulant."
 )
+
+_qdrant = None
+
+
+def _get_qdrant():
+    global _qdrant
+    if _qdrant is not None:
+        return _qdrant
+    if not QDRANT_URL:
+        return None
+    try:
+        from qdrant_client import QdrantClient, models as qmodels
+        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY_VAR or None)
+        cols = client.get_collections().collections
+        if "documents" not in [c.name for c in cols]:
+            client.create_collection(
+                collection_name="documents",
+                vectors_config=qmodels.VectorParams(size=VECTOR_SIZE, distance=qmodels.Distance.COSINE),
+            )
+        _qdrant = client
+        return _qdrant
+    except Exception:
+        return None
+
+
+def extract_text(filename: str, content: bytes) -> str:
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        reader = pypdf.PdfReader(io.BytesIO(content))
+        pages = []
+        for i, page in enumerate(reader.pages, 1):
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append(f"Page {i}\n{text}")
+        return "\n\n".join(pages)
+    if lower.endswith((".txt", ".md")):
+        return content.decode("utf-8", errors="replace")
+    if lower.endswith(".docx"):
+        doc = DocxDocument(io.BytesIO(content))
+        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    raise HTTPException(status_code=400, detail="Format non supporté — PDF, DOCX, TXT ou MD uniquement.")
+
+
+def chunk_text(text: str, chunk_size: int = 360, overlap: int = 60) -> list[str]:
+    words = text.split()
+    chunks, i = [], 0
+    while i < len(words):
+        chunks.append(" ".join(words[i: i + chunk_size]))
+        i += chunk_size - overlap
+    return [c for c in chunks if c.strip()]
+
+
+async def _get_embeddings(texts: list[str]) -> list[list[float]]:
+    if not _client:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY non configuré.")
+    resp = await _client.embeddings.create(model=EMBED_MODEL, input=texts)
+    return [d.embedding for d in resp.data]
+
+
+async def _retrieve_context(query: str, doc_id: str | None = None) -> str:
+    qdrant = _get_qdrant()
+    if not qdrant:
+        return ""
+    try:
+        from qdrant_client import models as qmodels
+        count = qdrant.get_collection("documents").points_count
+        if count == 0:
+            return ""
+        [embedding] = await _get_embeddings([query])
+        query_filter = None
+        if doc_id:
+            query_filter = qmodels.Filter(
+                must=[qmodels.FieldCondition(key="doc_id", match=qmodels.MatchValue(value=doc_id))]
+            )
+        results = qdrant.search(
+            collection_name="documents",
+            query_vector=embedding,
+            limit=15,
+            query_filter=query_filter,
+            with_payload=True,
+            with_vectors=False,
+        )
+        parts, seen = [], set()
+        for hit in results:
+            meta = hit.payload or {}
+            key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+            if key in seen or (1.0 - hit.score) > 0.6:
+                continue
+            seen.add(key)
+            source = meta.get("source", "Document")
+            parts.append(f"[source: {source} | extrait: {meta.get('chunk', 0)}]\n{meta.get('document_content', '')}")
+        return "\n\n---\n\n".join(parts)
+    except Exception:
+        return ""
 
 
 class ChatMessage(BaseModel):
@@ -72,6 +170,7 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
     use_corpus: bool = True
     model: str | None = None
+    doc_id: str | None = None
 
 
 async def _chat_handler(request: ChatRequest):
@@ -81,7 +180,24 @@ async def _chat_handler(request: ChatRequest):
             status_code=503,
         )
     model = request.model or OPENAI_MODEL
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    system = _SYSTEM_PROMPT
+    context = await _retrieve_context(request.message, request.doc_id) if request.use_corpus else ""
+
+    if context:
+        system += (
+            "\n\nCorpus de recherche. Utilise ces extraits seulement s'ils sont pertinents. "
+            "Cite la source entre crochets avec le nom du fichier. "
+            "Si le corpus est insuffisant, dis-le et propose une piste sans inventer de référence.\n\n"
+            + context
+        )
+    else:
+        system += (
+            "\n\nAucun extrait de corpus pertinent pour cette requête. "
+            "Tu peux aider à raisonner et à problématiser, "
+            "mais ne te réfère pas à des documents non indexés."
+        )
+
+    messages = [{"role": "system", "content": system}]
     for msg in request.history:
         role = "assistant" if msg.role == "model" else msg.role
         messages.append({"role": role, "content": msg.content})
@@ -89,27 +205,12 @@ async def _chat_handler(request: ChatRequest):
 
     try:
         response = await _client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=False,
+            model=model, messages=messages, stream=False
         )
-        content = response.choices[0].message.content or ""
-        return PlainTextResponse(content)
+        return PlainTextResponse(response.choices[0].message.content or "")
     except Exception as e:
         return JSONResponse({"detail": f"[DEBUG] {type(e).__name__}: {e}"}, status_code=500)
 
-
-def _models_response():
-    if not _client:
-        return {"default": "", "models": []}
-    return {
-        "default": OPENAI_MODEL,
-        "models": [{"name": OPENAI_MODEL, "size": 0, "modified_at": ""}],
-    }
-
-
-# Vercel may pass the full path (/api/chat) or strip the prefix (/chat).
-# Both are handled explicitly to avoid any middleware path-stripping issues.
 
 @app.post("/chat")
 @app.post("/api/chat")
@@ -120,4 +221,174 @@ async def chat(request: ChatRequest):
 @app.get("/models")
 @app.get("/api/models")
 async def list_models():
-    return _models_response()
+    if not _client:
+        return {"default": "", "models": []}
+    return {
+        "default": OPENAI_MODEL,
+        "models": [{"name": OPENAI_MODEL, "size": 0, "modified_at": ""}],
+    }
+
+
+@app.post("/documents/upload")
+@app.post("/api/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    qdrant = _get_qdrant()
+    if not qdrant:
+        raise HTTPException(
+            status_code=503,
+            detail="Stockage non configuré. Ajoutez QDRANT_URL et QDRANT_API_KEY sur Vercel.",
+        )
+    content = await file.read()
+    filename = file.filename or "document"
+    text = extract_text(filename, content)
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Document vide ou illisible.")
+
+    chunks = chunk_text(text)
+    doc_id = str(uuid.uuid4())
+    indexed_at = datetime.now(timezone.utc).isoformat()
+    word_count = len(text.split())
+
+    embeddings = await _get_embeddings(chunks)
+
+    from qdrant_client import models as qmodels
+    points = [
+        qmodels.PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embeddings[i],
+            payload={
+                "source": filename,
+                "doc_id": doc_id,
+                "chunk": i + 1,
+                "chunks": len(chunks),
+                "indexed_at": indexed_at,
+                "word_count": word_count,
+                "document_content": chunk,
+                "path": "",
+                "category": "",
+            },
+        )
+        for i, chunk in enumerate(chunks)
+    ]
+    qdrant.upsert(collection_name="documents", points=points, wait=True)
+    return {
+        "id": doc_id,
+        "name": filename,
+        "chunks": len(chunks),
+        "word_count": word_count,
+        "indexed_at": indexed_at,
+        "path": "",
+        "category": "",
+    }
+
+
+@app.get("/documents/stats")
+@app.get("/api/documents/stats")
+async def document_stats():
+    docs = await list_documents()
+    return {
+        "documents": len(docs),
+        "chunks": sum(int(d.get("chunks") or 0) for d in docs),
+        "words": sum(int(d.get("word_count") or 0) for d in docs),
+    }
+
+
+@app.get("/documents")
+@app.get("/api/documents")
+async def list_documents():
+    qdrant = _get_qdrant()
+    if not qdrant:
+        return []
+    try:
+        if qdrant.get_collection("documents").points_count == 0:
+            return []
+    except Exception:
+        return []
+
+    seen: dict[str, dict] = {}
+    offset = None
+    while True:
+        try:
+            records, offset = qdrant.scroll(
+                collection_name="documents",
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for record in records:
+                meta = record.payload or {}
+                doc_id = meta.get("doc_id", "")
+                if doc_id and doc_id not in seen:
+                    seen[doc_id] = {
+                        "id": doc_id,
+                        "name": meta.get("source", "Inconnu"),
+                        "chunks": meta.get("chunks", 0),
+                        "word_count": meta.get("word_count", 0),
+                        "indexed_at": meta.get("indexed_at", ""),
+                        "path": meta.get("path", ""),
+                        "category": meta.get("category", ""),
+                    }
+        except Exception:
+            break
+        if offset is None:
+            break
+    return sorted(seen.values(), key=lambda d: d["indexed_at"], reverse=True)
+
+
+@app.delete("/documents/{doc_id}")
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str):
+    qdrant = _get_qdrant()
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Stockage non configuré.")
+    try:
+        from qdrant_client import models as qmodels
+        qdrant.delete(
+            collection_name="documents",
+            points_selector=qmodels.Filter(
+                must=[qmodels.FieldCondition(key="doc_id", match=qmodels.MatchValue(value=doc_id))]
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"deleted": doc_id}
+
+
+@app.get("/documents/{doc_id}/content")
+@app.get("/api/documents/{doc_id}/content")
+async def get_document_content(doc_id: str):
+    qdrant = _get_qdrant()
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Stockage non configuré.")
+    try:
+        from qdrant_client import models as qmodels
+        records, _ = qdrant.scroll(
+            collection_name="documents",
+            scroll_filter=qmodels.Filter(
+                must=[qmodels.FieldCondition(key="doc_id", match=qmodels.MatchValue(value=doc_id))]
+            ),
+            limit=1000,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not records:
+            raise HTTPException(status_code=404, detail="Document non trouvé.")
+        sorted_records = sorted(
+            records, key=lambda r: (r.payload or {}).get("chunk", 0)
+        )
+        meta = sorted_records[0].payload or {}
+        content = "\n\n".join(
+            (r.payload or {}).get("document_content", "") for r in sorted_records
+        )
+        return {
+            "id": doc_id,
+            "name": meta.get("source", ""),
+            "content": content,
+            "word_count": meta.get("word_count", 0),
+            "chunks": len(sorted_records),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

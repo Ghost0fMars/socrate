@@ -138,14 +138,14 @@ async def _retrieve_context(query: str, doc_id: str | None = None) -> str:
             query_filter = qmodels.Filter(
                 must=[qmodels.FieldCondition(key="doc_id", match=qmodels.MatchValue(value=doc_id))]
             )
-        results = qdrant.search(
+        results = qdrant.query_points(
             collection_name="documents",
-            query_vector=embedding,
+            query=embedding,
             limit=15,
             query_filter=query_filter,
             with_payload=True,
             with_vectors=False,
-        )
+        ).points
         parts, seen = [], set()
         for hit in results:
             meta = hit.payload or {}

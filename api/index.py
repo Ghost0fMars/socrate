@@ -12,8 +12,6 @@ _env = pathlib.Path(__file__).parent.parent / ".env.local"
 if _env.exists():
     load_dotenv(_env, override=False)
 
-import pypdf
-from docx import Document as DocxDocument
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -92,6 +90,7 @@ def _get_qdrant():
 def extract_text(filename: str, content: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf"):
+        import pypdf
         reader = pypdf.PdfReader(io.BytesIO(content))
         pages = []
         for i, page in enumerate(reader.pages, 1):
@@ -102,6 +101,7 @@ def extract_text(filename: str, content: bytes) -> str:
     if lower.endswith((".txt", ".md")):
         return content.decode("utf-8", errors="replace")
     if lower.endswith(".docx"):
+        from docx import Document as DocxDocument
         doc = DocxDocument(io.BytesIO(content))
         return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
     raise HTTPException(status_code=400, detail="Format non supporté — PDF, DOCX, TXT ou MD uniquement.")

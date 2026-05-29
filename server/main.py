@@ -5,7 +5,7 @@ import pathlib
 import uuid
 from datetime import datetime, timezone
 
-import chromadb
+from qdrant_client import QdrantClient, models
 import ollama
 import pypdf
 from docx import Document as DocxDocument
@@ -55,13 +55,32 @@ NON_CHAT_MODEL_MARKERS = (
     "snowflake-arctic-embed",
 )
 
-_DB_PATH = pathlib.Path.home() / ".local" / "share" / "socrate" / "chroma_db"
+# Initialize Qdrant Client in local persistent storage mode
+_DB_PATH = pathlib.Path.home() / ".local" / "share" / "socrate" / "qdrant_db"
 _DB_PATH.mkdir(parents=True, exist_ok=True)
-chroma_client = chromadb.PersistentClient(path=str(_DB_PATH))
-collection = chroma_client.get_or_create_collection(
-    name="documents",
-    metadata={"hnsw:space": "cosine"},
-)
+qdrant_client = QdrantClient(path=str(_DB_PATH))
+
+# Dynamically determine size of configured embedding model
+try:
+    sample_emb = ollama.embed(model=EMBED_MODEL, input="test").embeddings[0]
+    vector_size = len(sample_emb)
+except Exception:
+    vector_size = 768  # Fallback for nomic-embed-text
+
+# Create collection if it doesn't exist
+try:
+    collections = qdrant_client.get_collections().collections
+    collection_names = [c.name for c in collections]
+    if "documents" not in collection_names:
+        qdrant_client.create_collection(
+            collection_name="documents",
+            vectors_config=models.VectorParams(
+                size=vector_size,
+                distance=models.Distance.COSINE
+            )
+        )
+except Exception as e:
+    print(f"Error initializing Qdrant collection: {e}")
 
 # Cache: {doc_id: source_name} — rebuilt on first access, invalidated on write.
 _doc_sources_cache: dict[str, str] | None = None
@@ -73,12 +92,26 @@ _index_state: dict = {"running": False, "done": 0, "total": 0, "errors": 0, "res
 def _get_doc_sources() -> dict[str, str]:
     global _doc_sources_cache
     if _doc_sources_cache is None:
-        all_meta = collection.get(include=["metadatas"])
         seen: dict[str, str] = {}
-        for meta in all_meta["metadatas"]:
-            did = meta.get("doc_id", "")
-            if did and did not in seen:
-                seen[did] = meta.get("source", "")
+        offset = None
+        while True:
+            try:
+                records, offset = qdrant_client.scroll(
+                    collection_name="documents",
+                    limit=1000,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for record in records:
+                    meta = record.payload or {}
+                    did = meta.get("doc_id", "")
+                    if did and did not in seen:
+                        seen[did] = meta.get("source", "")
+            except Exception:
+                break
+            if offset is None:
+                break
         _doc_sources_cache = seen
     return _doc_sources_cache
 
@@ -98,7 +131,6 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
     use_corpus: bool = True
     model: str | None = None
-    doc_id: str | None = None
 
 
 def chunk_text(text: str, chunk_size: int = 360, overlap: int = 60) -> list[str]:
@@ -142,9 +174,20 @@ def get_corpus_category(path: pathlib.Path) -> str:
 
 
 def delete_existing_path(path: pathlib.Path) -> None:
-    results = collection.get(where={"path": str(path)})
-    if results["ids"]:
-        collection.delete(ids=results["ids"])
+    try:
+        qdrant_client.delete(
+            collection_name="documents",
+            points_selector=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="path",
+                        match=models.MatchValue(value=str(path))
+                    )
+                ]
+            )
+        )
+    except Exception:
+        pass
 
 
 def index_text(
@@ -166,26 +209,32 @@ def index_text(
     if path:
         delete_existing_path(path)
 
-    ids, embeddings, documents, metadatas = [], [], [], []
+    points = []
     for i, chunk in enumerate(chunks):
-        ids.append(f"{doc_id}_{i}")
-        embeddings.append(get_embedding(chunk))
-        documents.append(chunk)
-        metadatas.append(
-            {
-                "source": filename,
-                "doc_id": doc_id,
-                "chunk": i + 1,
-                "chunks": len(chunks),
-                "indexed_at": indexed_at,
-                "word_count": word_count,
-                "path": source_path,
-                "category": category,
-            }
+        chunk_id = str(uuid.uuid4())
+        payload = {
+            "source": filename,
+            "doc_id": doc_id,
+            "chunk": i + 1,
+            "chunks": len(chunks),
+            "indexed_at": indexed_at,
+            "word_count": word_count,
+            "path": source_path,
+            "category": category,
+            "document_content": chunk,
+        }
+        points.append(
+            models.PointStruct(
+                id=chunk_id,
+                vector=get_embedding(chunk),
+                payload=payload
+            )
         )
 
-    collection.add(
-        embeddings=embeddings, ids=ids, documents=documents, metadatas=metadatas
+    qdrant_client.upsert(
+        collection_name="documents",
+        points=points,
+        wait=True
     )
     _invalidate_cache()
 
@@ -246,49 +295,68 @@ def _format_chunk(doc: str, meta: dict) -> str:
 
 
 def retrieve_context(query: str, n_results: int = 15) -> str:
-    if collection.count() == 0:
+    try:
+        count = qdrant_client.get_collection(collection_name="documents").points_count
+        if count == 0:
+            return ""
+    except Exception:
         return ""
+
     query_embedding = get_embedding(query)
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(n_results, collection.count()),
-        include=["documents", "metadatas", "distances"],
+    results = qdrant_client.search(
+        collection_name="documents",
+        query_vector=query_embedding,
+        limit=n_results,
+        with_payload=True,
+        with_vectors=False,
     )
 
     seen: set[str] = set()
     parts: list[str] = []
 
-    def collect(docs, metas, dists, max_dist: float = 0.6):
-        for doc, meta, dist in zip(docs, metas, dists):
+    def collect(hits, max_dist: float = 0.6):
+        for hit in hits:
+            meta = hit.payload or {}
+            doc = meta.get("document_content", "")
+            dist = 1.0 - hit.score  # Cosine distance
             key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
             if key in seen or dist > max_dist:
                 continue
             seen.add(key)
             parts.append(_format_chunk(doc, meta))
 
-    if results["documents"] and results["documents"][0]:
-        collect(results["documents"][0], results["metadatas"][0], results["distances"][0])
+    collect(results)
 
     # Keyword boost: when the query names a specific source, prepend its best chunks.
     boosted = _find_boosted_doc_ids(query)
     for doc_id in boosted:
-        r = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(5, collection.count()),
-            where={"doc_id": doc_id},
-            include=["documents", "metadatas", "distances"],
+        r = qdrant_client.search(
+            collection_name="documents",
+            query_vector=query_embedding,
+            limit=5,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="doc_id",
+                        match=models.MatchValue(value=doc_id)
+                    )
+                ]
+            ),
+            with_payload=True,
+            with_vectors=False,
         )
-        if r["documents"] and r["documents"][0]:
-            # Insert boosted chunks at the front, skipping distance filter
-            boosted_parts = []
-            for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
-                key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                boosted_parts.append(_format_chunk(doc, meta))
-            parts[:0] = boosted_parts  # prepend
+        # Insert boosted chunks at the front, skipping distance filter
+        boosted_parts = []
+        for hit in r:
+            meta = hit.payload or {}
+            doc = meta.get("document_content", "")
+            key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            boosted_parts.append(_format_chunk(doc, meta))
+        parts[:0] = boosted_parts  # prepend
 
     return "\n\n---\n\n".join(parts)
 
@@ -302,32 +370,15 @@ def _is_style_source(source: str) -> bool:
     return any(kw in s for kw in _STYLE_KEYWORDS)
 
 
-def retrieve_context_for_doc(doc_id: str, query: str, n_results: int = 10) -> str:
-    """Retrieve context restricted to a single document."""
-    if collection.count() == 0:
-        return ""
-    query_embedding = get_embedding(query)
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(n_results, collection.count()),
-        where={"doc_id": doc_id},
-        include=["documents", "metadatas", "distances"],
-    )
-    if not results["documents"] or not results["documents"][0]:
-        return ""
-    parts = []
-    for doc, meta, dist in zip(
-        results["documents"][0], results["metadatas"][0], results["distances"][0]
-    ):
-        if dist <= 0.75:
-            parts.append(_format_chunk(doc, meta))
-    return "\n\n---\n\n".join(parts)
-
-
 def retrieve_style_context(query: str, n_per_doc: int = 2) -> str:
     """Return semantically close excerpts from the user's own writing for style calibration."""
-    if collection.count() == 0:
+    try:
+        count = qdrant_client.get_collection(collection_name="documents").points_count
+        if count == 0:
+            return ""
+    except Exception:
         return ""
+
     style_doc_ids = {
         doc_id
         for doc_id, source in _get_doc_sources().items()
@@ -341,15 +392,24 @@ def retrieve_style_context(query: str, n_per_doc: int = 2) -> str:
     parts: list[str] = []
 
     for doc_id in style_doc_ids:
-        r = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(n_per_doc, collection.count()),
-            where={"doc_id": doc_id},
-            include=["documents", "metadatas"],
+        r = qdrant_client.search(
+            collection_name="documents",
+            query_vector=query_embedding,
+            limit=n_per_doc,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="doc_id",
+                        match=models.MatchValue(value=doc_id)
+                    )
+                ]
+            ),
+            with_payload=True,
+            with_vectors=False,
         )
-        if not r["documents"] or not r["documents"][0]:
-            continue
-        for doc, meta in zip(r["documents"][0], r["metadatas"][0]):
+        for hit in r:
+            meta = hit.payload or {}
+            doc = meta.get("document_content", "")
             key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
             if key in seen:
                 continue
@@ -366,15 +426,8 @@ def is_chat_model(name: str) -> bool:
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    if request.doc_id:
-        context = retrieve_context_for_doc(request.doc_id, request.message)
-        style_context = ""
-    elif request.use_corpus:
-        context = retrieve_context(request.message)
-        style_context = retrieve_style_context(request.message)
-    else:
-        context = ""
-        style_context = ""
+    context = retrieve_context(request.message) if request.use_corpus else ""
+    style_context = retrieve_style_context(request.message) if request.use_corpus else ""
     model = request.model or CHAT_MODEL
 
     system_prompt = (
@@ -501,12 +554,32 @@ async def _run_index_corpus() -> None:
     )
 
     # Skip paths already indexed and unmodified since last indexation.
-    if collection.count() > 0:
+    try:
+        count = qdrant_client.get_collection(collection_name="documents").points_count
+    except Exception:
+        count = 0
+
+    if count > 0:
         path_to_indexed_at: dict[str, str] = {}
-        for m in collection.get(include=["metadatas"])["metadatas"]:
-            p = m.get("path", "")
-            if p and p not in path_to_indexed_at:
-                path_to_indexed_at[p] = m.get("indexed_at", "")
+        offset = None
+        while True:
+            try:
+                records, offset = qdrant_client.scroll(
+                    collection_name="documents",
+                    limit=1000,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for record in records:
+                    meta = record.payload or {}
+                    p = meta.get("path", "")
+                    if p and p not in path_to_indexed_at:
+                        path_to_indexed_at[p] = meta.get("indexed_at", "")
+            except Exception:
+                break
+            if offset is None:
+                break
 
         files = []
         for f in all_files:
@@ -574,22 +647,41 @@ async def index_corpus_status():
 
 @app.get("/documents")
 async def list_documents():
-    if collection.count() == 0:
+    try:
+        count = qdrant_client.get_collection(collection_name="documents").points_count
+        if count == 0:
+            return []
+    except Exception:
         return []
-    results = collection.get(include=["metadatas"])
+
     seen: dict[str, dict] = {}
-    for meta in results["metadatas"]:
-        doc_id = meta.get("doc_id", "")
-        if doc_id and doc_id not in seen:
-            seen[doc_id] = {
-                "id": doc_id,
-                "name": meta.get("source", "Inconnu"),
-                "chunks": meta.get("chunks", 0),
-                "word_count": meta.get("word_count", 0),
-                "indexed_at": meta.get("indexed_at", ""),
-                "path": meta.get("path", ""),
-                "category": meta.get("category", ""),
-            }
+    offset = None
+    while True:
+        try:
+            records, offset = qdrant_client.scroll(
+                collection_name="documents",
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for record in records:
+                meta = record.payload or {}
+                doc_id = meta.get("doc_id", "")
+                if doc_id and doc_id not in seen:
+                    seen[doc_id] = {
+                        "id": doc_id,
+                        "name": meta.get("source", "Inconnu"),
+                        "chunks": meta.get("chunks", 0),
+                        "word_count": meta.get("word_count", 0),
+                        "indexed_at": meta.get("indexed_at", ""),
+                        "path": meta.get("path", ""),
+                        "category": meta.get("category", ""),
+                    }
+        except Exception:
+            break
+        if offset is None:
+            break
     return sorted(seen.values(), key=lambda doc: doc["indexed_at"], reverse=True)
 
 
@@ -603,41 +695,41 @@ async def document_stats():
     }
 
 
-@app.get("/documents/{doc_id}/content")
-async def get_document_content(doc_id: str):
-    results = collection.get(
-        where={"doc_id": doc_id},
-        include=["documents", "metadatas"],
-    )
-    if not results["ids"]:
-        raise HTTPException(status_code=404, detail="Document non trouvé.")
-
-    pairs = sorted(
-        zip(results["documents"], results["metadatas"]),
-        key=lambda x: x[1].get("chunk", 0),
-    )
-
-    OVERLAP = 60
-    words: list[str] = []
-    for i, (doc, _) in enumerate(pairs):
-        chunk_words = doc.split()
-        words.extend(chunk_words if i == 0 else chunk_words[OVERLAP:])
-
-    first_meta = pairs[0][1]
-    return {
-        "id": doc_id,
-        "name": first_meta.get("source", "Document"),
-        "content": " ".join(words),
-        "word_count": first_meta.get("word_count", len(words)),
-        "chunks": len(pairs),
-    }
-
-
 @app.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
-    results = collection.get(where={"doc_id": doc_id})
-    if not results["ids"]:
-        raise HTTPException(status_code=404, detail="Document non trouve.")
-    collection.delete(ids=results["ids"])
+    try:
+        records, _ = qdrant_client.scroll(
+            collection_name="documents",
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="doc_id",
+                        match=models.MatchValue(value=doc_id)
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=False,
+            with_vectors=False,
+        )
+        if not records:
+            raise HTTPException(status_code=404, detail="Document non trouve.")
+
+        qdrant_client.delete(
+            collection_name="documents",
+            points_selector=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="doc_id",
+                        match=models.MatchValue(value=doc_id)
+                    )
+                ]
+            )
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
     _invalidate_cache()
     return {"deleted": doc_id}

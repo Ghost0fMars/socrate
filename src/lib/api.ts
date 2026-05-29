@@ -150,12 +150,18 @@ export async function deleteDocument(id: string): Promise<void> {
   if (!response.ok) throw new Error("Impossible de supprimer le document.");
 }
 
+export interface ChunkItem {
+  chunk: number;
+  content: string;
+}
+
 export interface DocumentContent {
   id: string;
   name: string;
   content: string;
   word_count: number;
   chunks: number;
+  chunks_list?: ChunkItem[];
 }
 
 export async function getDocumentContent(id: string): Promise<DocumentContent> {

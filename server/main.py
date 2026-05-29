@@ -15,7 +15,7 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel, Field
 
 _ENV_LOCAL = pathlib.Path(__file__).parent.parent / ".env.local"
@@ -37,6 +37,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 _openai_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_openai_sync_client: OpenAI | None = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "text-davinci")
 CORPUS_PATH = pathlib.Path(
@@ -60,30 +61,37 @@ NON_CHAT_MODEL_MARKERS = (
 _DB_PATH = pathlib.Path.home() / ".local" / "share" / "socrate" / "qdrant_db"
 _DB_PATH.mkdir(parents=True, exist_ok=True)
 qdrant_client = QdrantClient(path=str(_DB_PATH))
-
-# Dynamically determine size of configured embedding model
-try:
-    sample_emb = ollama.embed(model=EMBED_MODEL, input="test").embeddings[0]
-    vector_size = len(sample_emb)
-except Exception:
-    vector_size = 768  # Fallback for nomic-embed-text
-
-# Create collection if it doesn't exist
-try:
-    collections = qdrant_client.get_collections().collections
-    collection_names = [c.name for c in collections]
-    if "documents" not in collection_names:
-        qdrant_client.create_collection(
-            collection_name="documents",
-            vectors_config=models.VectorParams(
-                size=vector_size,
-                distance=models.Distance.COSINE
-            )
-        )
-except Exception as e:
-    print(f"Error initializing Qdrant collection: {e}")
-
 _qdrant_lock = threading.Lock()
+
+def get_active_collection() -> tuple[str, int]:
+    """Return the active collection name and dimension size based on model config."""
+    if OPENAI_API_KEY and _openai_sync_client:
+        return "documents_openai", 1536
+    return "documents", 768
+
+def _ensure_collection(collection_name: str, size: int) -> None:
+    try:
+        with _qdrant_lock:
+            collections = qdrant_client.get_collections().collections
+            collection_names = [c.name for c in collections]
+            if collection_name not in collection_names:
+                qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=models.VectorParams(
+                        size=size,
+                        distance=models.Distance.COSINE
+                    )
+                )
+    except Exception as e:
+        print(f"Error ensuring Qdrant collection {collection_name!r}: {e}", flush=True)
+
+# Pre-ensure default collections on startup
+try:
+    _ensure_collection("documents", 768)
+    if OPENAI_API_KEY:
+        _ensure_collection("documents_openai", 1536)
+except Exception as e:
+    print(f"Startup Qdrant ensure failed: {e}", flush=True)
 
 # Cache: {doc_id: source_name} — rebuilt on first access, invalidated on write.
 _doc_sources_cache: dict[str, str] | None = None
@@ -97,11 +105,13 @@ def _get_doc_sources() -> dict[str, str]:
     if _doc_sources_cache is None:
         seen: dict[str, str] = {}
         offset = None
+        collection_name, collection_size = get_active_collection()
+        _ensure_collection(collection_name, collection_size)
         while True:
             try:
                 with _qdrant_lock:
                     records, offset = qdrant_client.scroll(
-                        collection_name="documents",
+                        collection_name=collection_name,
                         limit=1000,
                         offset=offset,
                         with_payload=True,
@@ -178,10 +188,11 @@ def get_corpus_category(path: pathlib.Path) -> str:
 
 
 def delete_existing_path(path: pathlib.Path) -> None:
+    collection_name, _ = get_active_collection()
     try:
         with _qdrant_lock:
             qdrant_client.delete(
-                collection_name="documents",
+                collection_name=collection_name,
                 points_selector=models.Filter(
                     must=[
                         models.FieldCondition(
@@ -194,6 +205,32 @@ def delete_existing_path(path: pathlib.Path) -> None:
     except Exception:
         pass
 
+
+def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    # Try OpenAI if configured
+    if OPENAI_API_KEY and _openai_sync_client:
+        try:
+            response = _openai_sync_client.embeddings.create(
+                model="text-embedding-3-small",
+                input=texts
+            )
+            return [d.embedding for d in response.data]
+        except Exception as e:
+            print(f"OpenAI embedding error: {e}, falling back to Ollama", flush=True)
+
+    # Fallback to Ollama
+    try:
+        response = ollama.embed(model=EMBED_MODEL, input=texts)
+        return response.embeddings
+    except Exception as e:
+        print(f"Ollama embedding error: {e}", flush=True)
+        raise
+
+def get_embedding(text: str) -> list[float]:
+    embeddings = get_embeddings_batch([text])
+    return embeddings[0]
 
 def index_text(
     *,
@@ -211,8 +248,18 @@ def index_text(
     word_count = len(text.split())
     source_path = str(path) if path else ""
 
+    collection_name, collection_size = get_active_collection()
+    _ensure_collection(collection_name, collection_size)
+
     if path:
         delete_existing_path(path)
+
+    # Batch embeddings creation in groups of 32 chunks to avoid limits
+    batch_size = 32
+    embeddings = []
+    for offset in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[offset:offset + batch_size]
+        embeddings.extend(get_embeddings_batch(batch_chunks))
 
     points = []
     for i, chunk in enumerate(chunks):
@@ -231,14 +278,14 @@ def index_text(
         points.append(
             models.PointStruct(
                 id=chunk_id,
-                vector=get_embedding(chunk),
+                vector=embeddings[i],
                 payload=payload
             )
         )
 
     with _qdrant_lock:
         qdrant_client.upsert(
-            collection_name="documents",
+            collection_name=collection_name,
             points=points,
             wait=True
         )
@@ -253,11 +300,6 @@ def index_text(
         "path": source_path,
         "category": category,
     }
-
-
-def get_embedding(text: str) -> list[float]:
-    response = ollama.embed(model=EMBED_MODEL, input=text)
-    return response.embeddings[0]
 
 
 _STOP_FR = {
@@ -300,25 +342,35 @@ def _format_chunk(doc: str, meta: dict) -> str:
     return f"[source: {label} | extrait: {chunk}]\n{doc}"
 
 
-def retrieve_context(query: str, n_results: int = 15) -> str:
+def retrieve_context(query: str, n_results: int = 4) -> str:
+    collection_name, collection_size = get_active_collection()
+    _ensure_collection(collection_name, collection_size)
     try:
         with _qdrant_lock:
-            count = qdrant_client.get_collection(collection_name="documents").points_count
+            count = qdrant_client.get_collection(collection_name=collection_name).points_count
         if count == 0:
             return ""
     except Exception:
         return ""
 
-    query_embedding = get_embedding(query)
+    try:
+        query_embedding = get_embedding(query)
+    except Exception as exc:
+        print(f"Error getting query embedding in retrieve_context: {exc}", flush=True)
+        return ""
 
-    with _qdrant_lock:
-        results = qdrant_client.query_points(
-            collection_name="documents",
-            query=query_embedding,
-            limit=n_results,
-            with_payload=True,
-            with_vectors=False,
-        ).points
+    try:
+        with _qdrant_lock:
+            results = qdrant_client.query_points(
+                collection_name=collection_name,
+                query=query_embedding,
+                limit=n_results,
+                with_payload=True,
+                with_vectors=False,
+            ).points
+    except Exception as exc:
+        print(f"Error querying Qdrant in retrieve_context: {exc}", flush=True)
+        return ""
 
     seen: set[str] = set()
     parts: list[str] = []
@@ -337,35 +389,38 @@ def retrieve_context(query: str, n_results: int = 15) -> str:
     collect(results)
 
     # Keyword boost: when the query names a specific source, prepend its best chunks.
-    boosted = _find_boosted_doc_ids(query)
-    for doc_id in boosted:
-        with _qdrant_lock:
-            r = qdrant_client.query_points(
-                collection_name="documents",
-                query=query_embedding,
-                limit=5,
-                query_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_id",
-                            match=models.MatchValue(value=doc_id)
-                        )
-                    ]
-                ),
-                with_payload=True,
-                with_vectors=False,
-            ).points
-        # Insert boosted chunks at the front, skipping distance filter
-        boosted_parts = []
-        for hit in r:
-            meta = hit.payload or {}
-            doc = meta.get("document_content", "")
-            key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            boosted_parts.append(_format_chunk(doc, meta))
-        parts[:0] = boosted_parts  # prepend
+    try:
+        boosted = _find_boosted_doc_ids(query)
+        for doc_id in boosted:
+            with _qdrant_lock:
+                r = qdrant_client.query_points(
+                    collection_name=collection_name,
+                    query=query_embedding,
+                    limit=3,
+                    query_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="doc_id",
+                                match=models.MatchValue(value=doc_id)
+                            )
+                        ]
+                    ),
+                    with_payload=True,
+                    with_vectors=False,
+                ).points
+            # Insert boosted chunks at the front, skipping distance filter
+            boosted_parts = []
+            for hit in r:
+                meta = hit.payload or {}
+                doc = meta.get("document_content", "")
+                key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                boosted_parts.append(_format_chunk(doc, meta))
+            parts[:0] = boosted_parts  # prepend
+    except Exception as exc:
+        print(f"Error in keyword boost retrieve_context: {exc}", flush=True)
 
     return "\n\n---\n\n".join(parts)
 
@@ -379,53 +434,69 @@ def _is_style_source(source: str) -> bool:
     return any(kw in s for kw in _STYLE_KEYWORDS)
 
 
-def retrieve_style_context(query: str, n_per_doc: int = 2) -> str:
+def retrieve_style_context(query: str, n_results: int = 3) -> str:
     """Return semantically close excerpts from the user's own writing for style calibration."""
+    collection_name, collection_size = get_active_collection()
+    _ensure_collection(collection_name, collection_size)
     try:
         with _qdrant_lock:
-            count = qdrant_client.get_collection(collection_name="documents").points_count
+            count = qdrant_client.get_collection(collection_name=collection_name).points_count
         if count == 0:
             return ""
     except Exception:
         return ""
 
-    style_doc_ids = {
-        doc_id
-        for doc_id, source in _get_doc_sources().items()
-        if _is_style_source(source)
-    }
+    try:
+        style_doc_ids = {
+            doc_id
+            for doc_id, source in _get_doc_sources().items()
+            if _is_style_source(source)
+        }
+    except Exception as exc:
+        print(f"Error listing style sources in retrieve_style_context: {exc}", flush=True)
+        return ""
+
     if not style_doc_ids:
         return ""
 
-    query_embedding = get_embedding(query)
-    seen: set[str] = set()
-    parts: list[str] = []
+    try:
+        query_embedding = get_embedding(query)
+    except Exception as exc:
+        print(f"Error getting query embedding in retrieve_style_context: {exc}", flush=True)
+        return ""
 
-    for doc_id in style_doc_ids:
+    try:
         with _qdrant_lock:
-            r = qdrant_client.query_points(
-                collection_name="documents",
+            results = qdrant_client.query_points(
+                collection_name=collection_name,
                 query=query_embedding,
-                limit=n_per_doc,
+                limit=n_results,
                 query_filter=models.Filter(
                     must=[
                         models.FieldCondition(
                             key="doc_id",
-                            match=models.MatchValue(value=doc_id)
+                            match=models.MatchAny(any=list(style_doc_ids))
                         )
                     ]
                 ),
                 with_payload=True,
                 with_vectors=False,
             ).points
-        for hit in r:
-            meta = hit.payload or {}
-            doc = meta.get("document_content", "")
-            key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            parts.append(f"[{meta.get('source', 'Document')}]\n{doc}")
+    except Exception as exc:
+        print(f"Error querying Qdrant in retrieve_style_context: {exc}", flush=True)
+        return ""
+
+    seen: set[str] = set()
+    parts: list[str] = []
+
+    for hit in results:
+        meta = hit.payload or {}
+        doc = meta.get("document_content", "")
+        key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(f"[{meta.get('source', 'Document')}]\n{doc}")
 
     return "\n\n---\n\n".join(parts)
 
@@ -575,9 +646,12 @@ async def _run_index_corpus() -> None:
         if p.is_file() and p.suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
     )
 
+    collection_name, collection_size = get_active_collection()
+    _ensure_collection(collection_name, collection_size)
+
     # Skip paths already indexed and unmodified since last indexation.
     try:
-        count = qdrant_client.get_collection(collection_name="documents").points_count
+        count = qdrant_client.get_collection(collection_name=collection_name).points_count
     except Exception:
         count = 0
 
@@ -587,7 +661,7 @@ async def _run_index_corpus() -> None:
         while True:
             try:
                 records, offset = qdrant_client.scroll(
-                    collection_name="documents",
+                    collection_name=collection_name,
                     limit=1000,
                     offset=offset,
                     with_payload=True,
@@ -669,8 +743,10 @@ async def index_corpus_status():
 
 @app.get("/documents")
 async def list_documents():
+    collection_name, collection_size = get_active_collection()
+    _ensure_collection(collection_name, collection_size)
     try:
-        count = qdrant_client.get_collection(collection_name="documents").points_count
+        count = qdrant_client.get_collection(collection_name=collection_name).points_count
         if count == 0:
             return []
     except Exception:
@@ -681,7 +757,7 @@ async def list_documents():
     while True:
         try:
             records, offset = qdrant_client.scroll(
-                collection_name="documents",
+                collection_name=collection_name,
                 limit=1000,
                 offset=offset,
                 with_payload=True,
@@ -719,13 +795,14 @@ async def document_stats():
 
 @app.get("/documents/{doc_id}/content")
 async def get_document_content(doc_id: str):
+    collection_name, _ = get_active_collection()
     all_records = []
     offset = None
     while True:
         try:
             with _qdrant_lock:
                 records, offset = qdrant_client.scroll(
-                    collection_name="documents",
+                    collection_name=collection_name,
                     scroll_filter=models.Filter(
                         must=[
                             models.FieldCondition(
@@ -753,13 +830,26 @@ async def get_document_content(doc_id: str):
     source = meta0.get("source", "Inconnu")
     word_count = meta0.get("word_count", 0)
 
+    chunks_list = [
+        {
+            "chunk": (r.payload or {}).get("chunk", 0),
+            "content": (r.payload or {}).get("document_content", "")
+        } for r in all_records
+    ]
+
     path_str = meta0.get("path", "")
     if path_str:
         p = pathlib.Path(path_str)
         if p.exists():
             try:
                 text = extract_text(p.name, p.read_bytes())
-                return {"name": source, "content": text, "word_count": word_count, "chunks": len(all_records)}
+                return {
+                    "name": source, 
+                    "content": text, 
+                    "word_count": word_count, 
+                    "chunks": len(all_records),
+                    "chunks_list": chunks_list
+                }
             except Exception:
                 pass
 
@@ -770,14 +860,21 @@ async def get_document_content(doc_id: str):
         words = ((record.payload or {}).get("document_content", "")).split()
         parts.extend(words[:step] if i < len(all_records) - 1 else words)
 
-    return {"name": source, "content": " ".join(parts), "word_count": word_count, "chunks": len(all_records)}
+    return {
+        "name": source, 
+        "content": " ".join(parts), 
+        "word_count": word_count, 
+        "chunks": len(all_records),
+        "chunks_list": chunks_list
+    }
 
 
 @app.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
+    collection_name, _ = get_active_collection()
     try:
         records, _ = qdrant_client.scroll(
-            collection_name="documents",
+            collection_name=collection_name,
             scroll_filter=models.Filter(
                 must=[
                     models.FieldCondition(
@@ -794,7 +891,7 @@ async def delete_document(doc_id: str):
             raise HTTPException(status_code=404, detail="Document non trouve.")
 
         qdrant_client.delete(
-            collection_name="documents",
+            collection_name=collection_name,
             points_selector=models.Filter(
                 must=[
                     models.FieldCondition(

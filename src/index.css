@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,700&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -6,21 +6,69 @@
   --font-serif: "Playfair Display", ui-serif, Georgia, serif;
 }
 
-body {
-  background-color: #FDFCFA;
-  color: #1A1A1A;
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
+:root {
+  --bg-primary: #FDFCFA;
+  --bg-secondary: #F5F2EF;
+  --bg-tertiary: #F0EDE9;
+  --border-color: #E5E2DD;
+  --text-primary: #1A1A1A;
+  --text-secondary: #4A4A4A;
+  --text-tertiary: #8C8C8C;
+  --text-muted: #CBC7C0;
+  --accent-color: #000000;
+  --accent-hover: #333333;
+  --highlight-color: #FFF9E6;
+  --highlight-border: #FFE8A3;
+  --nav-bg: #FDFCFA;
+  --shadow-color: rgba(0, 0, 0, 0.03);
 }
 
+.dark {
+  --bg-primary: #0D0D0C;
+  --bg-secondary: #161614;
+  --bg-tertiary: #20201D;
+  --border-color: #2E2E2A;
+  --text-primary: #ECEAE4;
+  --text-secondary: #CFCBC2;
+  --text-tertiary: #A6A196;
+  --text-muted: #5C5952;
+  --accent-color: #ECEAE4;
+  --accent-hover: #FFFFFF;
+  --highlight-color: #2F2716;
+  --highlight-border: #614D20;
+  --nav-bg: #0D0D0C;
+  --shadow-color: rgba(0, 0, 0, 0.3);
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Glassmorphism utility */
+.glass {
+  background-color: rgba(253, 252, 250, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.dark .glass {
+  background-color: rgba(13, 13, 12, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Markdown Rendering Engine Styling */
 .markdown-body {
-  font-size: 1.1rem;
-  line-height: 1.7;
-  color: #4A4A4A;
+  font-size: 1.05rem;
+  line-height: 1.75;
+  color: var(--text-secondary);
 }
 
 .markdown-body p {
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
 }
 
 .markdown-body p:last-child {
@@ -28,30 +76,71 @@ body {
 }
 
 .markdown-body code {
-  background-color: #F5F2EF;
-  color: #1A1A1A;
-  padding: 0.2rem 0.4rem;
-  border-radius: 4px;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 0.9em;
+  font-size: 0.85em;
+  border: 1px solid var(--border-color);
 }
 
 .markdown-body pre {
-  background-color: #F9F7F5;
-  padding: 1.5rem;
+  background-color: var(--bg-secondary);
+  padding: 1.25rem;
   border-radius: 4px;
-  border: 1px solid #E5E2DD;
+  border: 1px solid var(--border-color);
   overflow-x: auto;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.markdown-body pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  font-size: 0.9em;
 }
 
 .markdown-body ul, .markdown-body ol {
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
   padding-left: 1.5rem;
 }
 
 .markdown-body li {
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--text-muted);
+  padding-left: 1rem;
+  font-style: italic;
+  color: var(--text-tertiary);
+  margin-bottom: 1.25rem;
+}
+
+/* Socratic citation dynamic highlight sweep */
+@keyframes highlight-sweep {
+  0% {
+    background-color: var(--highlight-color);
+    box-shadow: 0 0 0 4px var(--highlight-color);
+    border-radius: 4px;
+  }
+  30% {
+    background-color: var(--highlight-color);
+    box-shadow: 0 0 0 6px var(--highlight-color);
+    border-radius: 4px;
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: none;
+  }
+}
+
+.citation-highlight {
+  animation: highlight-sweep 3.5s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+  border-bottom: 2px dashed var(--highlight-border);
+  padding: 2px 0;
 }
 
 /* Hide scrollbar for Chrome, Safari and Opera */
@@ -64,3 +153,15 @@ body {
   -ms-overflow-style: none;  /* IE and Edge */
   scrollbar-width: none;  /* Firefox */
 }
+
+/* Automatic Dark Mode Overrides for Hardcoded CSS classes */
+.dark .bg-\[\#FDFCFA\] { background-color: var(--bg-primary) !important; }
+.dark .bg-\[\#F5F2EF\] { background-color: var(--bg-secondary) !important; }
+.dark .bg-\[\#F0EDE9\] { background-color: var(--bg-tertiary) !important; }
+.dark .border-\[\#E5E2DD\] { border-color: var(--border-color) !important; }
+.dark .border-\[\#F0EDE9\] { border-color: var(--border-color) !important; }
+.dark .text-\[\#1A1A1A\] { color: var(--text-primary) !important; }
+.dark .text-\[\#4A4A4A\] { color: var(--text-secondary) !important; }
+.dark .text-\[\#8C8C8C\] { color: var(--text-tertiary) !important; }
+.dark .text-\[\#CBC7C0\] { color: var(--text-muted) !important; }
+.dark .text-\[\#E5E2DD\] { color: var(--text-muted) !important; }

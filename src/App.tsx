@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -68,9 +68,19 @@ const MODEL_LABELS: Record<string, string> = {
 const getModelLabel = (name: string) => MODEL_LABELS[name] ?? name;
 
 export default function App() {
+  const [theme, setTheme] = useState(() => localStorage.getItem("socrate_theme") ?? "light");
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (theme === "dark") {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+    localStorage.setItem("socrate_theme", theme);
+  }, [theme]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -100,6 +110,7 @@ export default function App() {
 
   const [viewingDoc, setViewingDoc] = useState<Document | null>(null);
   const [docContent, setDocContent] = useState("");
+  const [docChunks, setDocChunks] = useState<any[]>([]);
   const [docContentLoading, setDocContentLoading] = useState(false);
   const [docMessages, setDocMessages] = useState<Message[]>([]);
   const [docInput, setDocInput] = useState("");
@@ -307,17 +318,53 @@ export default function App() {
   const handleViewDoc = async (doc: Document) => {
     setViewingDoc(doc);
     setDocContent("");
+    setDocChunks([]);
     setDocMessages([]);
     setDocInput("");
     setDocContentLoading(true);
     try {
       const result = await getDocumentContent(doc.id);
       setDocContent(result.content);
+      setDocChunks(result.chunks_list ?? []);
     } catch {
       setDocContent("Erreur lors du chargement du contenu.");
+      setDocChunks([]);
     } finally {
       setDocContentLoading(false);
     }
+  };
+
+  const handleCitationClick = async (docName: string, chunkIndex: number) => {
+    const targetDoc = documents.find(
+      (d) =>
+        d.name.toLowerCase() === docName.toLowerCase() ||
+        d.name.toLowerCase().includes(docName.toLowerCase()) ||
+        docName.toLowerCase().includes(d.name.toLowerCase())
+    );
+    if (!targetDoc) return;
+
+    await handleViewDoc(targetDoc);
+
+    setTimeout(() => {
+      const element = document.getElementById(`doc-chunk-${chunkIndex}`);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+        element.classList.add("citation-highlight");
+        setTimeout(() => {
+          element.classList.remove("citation-highlight");
+        }, 3500);
+      }
+    }, 600);
+  };
+
+  const processCitations = (text: string) => {
+    const regex = /\[source:\s*([^|\]]+)(?:\s*\|\s*extrait:\s*(\d+))?\]/gi;
+    return text.replace(regex, (match, fileName, chunkStr) => {
+      const chunk = chunkStr ? parseInt(chunkStr, 10) : 1;
+      const label = fileName.trim();
+      const encodedName = encodeURIComponent(label).replace(/\./g, "%2E");
+      return `[${label} (Extrait ${chunk})](#citation-${encodedName}-${chunk})`;
+    });
   };
 
   const handleDocStop = () => {
@@ -472,6 +519,25 @@ export default function App() {
         </div>
 
         <div className="flex flex-col items-center gap-6">
+          {/* Toggle Theme */}
+          <button
+            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+            title={theme === "light" ? "Mode Sombre" : "Mode Clair"}
+            className="flex flex-col items-center gap-1 group transition-transform hover:scale-105 active:scale-95 cursor-pointer"
+          >
+            {theme === "light" ? (
+              <Moon
+                size={18}
+                className="text-[#CBC7C0] group-hover:text-black transition-colors"
+              />
+            ) : (
+              <Sun
+                size={18}
+                className="text-[#8C8C8C] group-hover:text-white transition-colors"
+              />
+            )}
+          </button>
+
           {/* New conversation */}
           <button
             onClick={handleNewConversation}
@@ -623,7 +689,44 @@ export default function App() {
                     {message.role === "user" ? (
                       <span className="font-light">{message.content}</span>
                     ) : (
-                      <Markdown>{message.content}</Markdown>
+                      <Markdown
+                        components={{
+                          a: ({ href, children, ...props }) => {
+                            if (href && href.startsWith("#citation-")) {
+                              const parts = href.replace("#citation-", "").split("-");
+                              const docName = decodeURIComponent(parts[0]);
+                              const chunkIndex = parseInt(parts[1], 10);
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowDocs(true);
+                                    handleCitationClick(docName, chunkIndex);
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 rounded bg-[#F5F2EF] hover:bg-[#E5E2DD] text-[#4A4A4A] dark:bg-[#20201D] dark:hover:bg-[#2E2E2A] dark:text-[#ECEAE4] border border-[#E5E2DD] dark:border-[#2D2D29] text-[11px] font-semibold cursor-pointer transition-colors shadow-sm"
+                                >
+                                  <BookOpen size={10} className="text-[#8C8C8C] shrink-0" />
+                                  <span className="font-serif italic truncate max-w-28">{docName.split('.')[0]}</span>
+                                  <span className="text-[9px] text-[#8C8C8C] dark:text-[#A6A196]">p. {chunkIndex}</span>
+                                </button>
+                              );
+                            }
+                            return (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="underline text-black dark:text-white font-medium hover:opacity-80"
+                                {...props}
+                              >
+                                {children}
+                              </a>
+                            );
+                          }
+                        }}
+                      >
+                        {processCitations(message.content)}
+                      </Markdown>
                     )}
                   </div>
                 </div>
@@ -900,9 +1003,23 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="max-w-2xl mx-auto">
-                    <p className="text-[13px] font-light leading-relaxed text-[#1A1A1A] whitespace-pre-wrap">
-                      {docContent}
-                    </p>
+                    {docChunks.length > 0 ? (
+                      <div className="space-y-6">
+                        {docChunks.map((chunkItem) => (
+                          <p
+                            key={chunkItem.chunk}
+                            id={`doc-chunk-${chunkItem.chunk}`}
+                            className="text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] whitespace-pre-wrap transition-all duration-300"
+                          >
+                            {chunkItem.content}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] whitespace-pre-wrap">
+                        {docContent}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -930,11 +1047,47 @@ export default function App() {
                           <p className="text-[9px] tracking-widest text-[#8C8C8C] uppercase font-semibold mb-2">
                             {msg.role === "user" ? "Vous" : "L'Esprit"}
                           </p>
-                          <div className="text-[13px] leading-relaxed font-light text-[#1A1A1A]">
+                          <div className="text-[13px] leading-relaxed font-light text-[#1A1A1A] dark:text-[#ECEAE4]">
                             {msg.role === "user" ? (
                               <span>{msg.content}</span>
                             ) : (
-                              <Markdown>{msg.content}</Markdown>
+                              <Markdown
+                                components={{
+                                  a: ({ href, children, ...props }) => {
+                                    if (href && href.startsWith("#citation-")) {
+                                      const parts = href.replace("#citation-", "").split("-");
+                                      const docName = decodeURIComponent(parts[0]);
+                                      const chunkIndex = parseInt(parts[1], 10);
+                                      return (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            handleCitationClick(docName, chunkIndex);
+                                          }}
+                                          className="inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 rounded bg-[#F5F2EF] hover:bg-[#E5E2DD] text-[#4A4A4A] dark:bg-[#20201D] dark:hover:bg-[#2E2E2A] dark:text-[#ECEAE4] border border-[#E5E2DD] dark:border-[#2D2D29] text-[11px] font-semibold cursor-pointer transition-colors shadow-sm"
+                                        >
+                                          <BookOpen size={10} className="text-[#8C8C8C] shrink-0" />
+                                          <span className="font-serif italic truncate max-w-28">{docName.split('.')[0]}</span>
+                                          <span className="text-[9px] text-[#8C8C8C] dark:text-[#A6A196]">p. {chunkIndex}</span>
+                                        </button>
+                                      );
+                                    }
+                                    return (
+                                      <a
+                                        href={href}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="underline text-black dark:text-white font-medium hover:opacity-80"
+                                        {...props}
+                                      >
+                                        {children}
+                                      </a>
+                                    );
+                                  }
+                                }}
+                              >
+                                {processCitations(msg.content)}
+                              </Markdown>
                             )}
                           </div>
                         </div>

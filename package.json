@@ -20,7 +20,7 @@
     "lint": "tsc --noEmit",
     "electron:compile": "node -e \"require('fs').mkdirSync('electron-dist',{recursive:true}); require('fs').writeFileSync('electron-dist/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && tsc -p tsconfig.electron.json",
     "electron:pack": "cross-env ELECTRON_BUILD=true VITE_API_URL=http://localhost:8000 vite build && npm run electron:compile",
-    "electron:start": "npm run electron:pack && electron .",
+    "electron:start": "npm run electron:pack && electron . --disable-gpu --disable-software-rasterizer --disable-gpu-sandbox --no-sandbox",
     "dist": "npm run electron:pack && electron-builder"
   },
   "build": {

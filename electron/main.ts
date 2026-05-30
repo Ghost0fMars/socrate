@@ -1,4 +1,12 @@
 import { app, BrowserWindow, shell } from 'electron';
+
+// Disable GPU hardware acceleration immediately before any process initialization
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
+app.commandLine.appendSwitch('disable-gpu-sandbox');
+app.commandLine.appendSwitch('no-sandbox');
+
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as http from 'http';

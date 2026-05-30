@@ -12,11 +12,14 @@ _env = pathlib.Path(__file__).parent.parent / ".env.local"
 if _env.exists():
     load_dotenv(_env, override=False)
 
+from docx import Document as DocxDocument
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from openai import AsyncOpenAI
+import pypdf
 from pydantic import BaseModel, Field
+from qdrant_client import QdrantClient, models as qmodels
 from api.metrics.dramatic_integral import calculate_dramatic_tension
 
 app = FastAPI()
@@ -46,23 +49,6 @@ VECTOR_SIZE = 1536
 
 _client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-_SYSTEM_PROMPT = (
-    "Tu es un directeur de recherche universitaire spécialisé en théorie de l'art, "
-    "de l'écriture narrative et de la représentation. "
-    "Tu connais intimement les travaux de cet étudiant — tu as lu ses textes, "
-    "ses scénarios, son journal. Tu travailles depuis son corpus et depuis sa propre écriture.\n\n"
-    "Ton approche :\n"
-    "— Tu poses des questions qui déstabilisent les certitudes sans les détruire.\n"
-    "— Tu exiges que chaque affirmation soit étayée, chaque concept défini avec précision.\n"
-    "— Tu identifies les glissements conceptuels, les contradictions, "
-    "les raccourcis intellectuels non justifiés.\n"
-    "— Tu proposes des pistes depuis le corpus quand c'est pertinent, "
-    "avec la référence exacte entre crochets.\n"
-    "— Tu reconnais la voix de cet étudiant et tu t'y accordes — "
-    "tu adoptes son registre, son rythme, sa façon d'articuler les idées.\n"
-    "— Tu ne flattes pas. Tu stimules. Tu exiges.\n\n"
-    "Réponds en français. Sois précis, exigeant, et intellectuellement stimulant."
-)
 
 _qdrant = None
 
@@ -74,7 +60,6 @@ def _get_qdrant():
     if not QDRANT_URL:
         return None
     try:
-        from qdrant_client import QdrantClient, models as qmodels
         client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY_VAR or None)
         cols = client.get_collections().collections
         if "documents" not in [c.name for c in cols]:
@@ -91,7 +76,6 @@ def _get_qdrant():
 def extract_text(filename: str, content: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf"):
-        import pypdf
         reader = pypdf.PdfReader(io.BytesIO(content))
         pages = []
         for i, page in enumerate(reader.pages, 1):
@@ -102,7 +86,6 @@ def extract_text(filename: str, content: bytes) -> str:
     if lower.endswith((".txt", ".md")):
         return content.decode("utf-8", errors="replace")
     if lower.endswith(".docx"):
-        from docx import Document as DocxDocument
         doc = DocxDocument(io.BytesIO(content))
         return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
     raise HTTPException(status_code=400, detail="Format non supporté — PDF, DOCX, TXT ou MD uniquement.")
@@ -129,7 +112,6 @@ async def _retrieve_context(query: str, doc_id: str | None = None) -> str:
     if not qdrant:
         return ""
     try:
-        from qdrant_client import models as qmodels
         count = qdrant.get_collection("documents").points_count
         if count == 0:
             return ""
@@ -191,8 +173,21 @@ async def _chat_handler(request: ChatRequest):
     tension_score = tension_metrics["tension_score"]
 
     system = (
-        _SYSTEM_PROMPT
-        + f"\n\n[PEDAGOGICAL METRICS: Dramatic Tension S(t)={tension_score}, Posture={'Maïeutique Pure' if is_maieutic else 'Accompagnement Direct'}]\n\n"
+        "Tu es un directeur de recherche universitaire spécialisé en théorie de l'art, "
+        "de l'écriture narrative et de la représentation. "
+        "Tu connais intimement les travaux de cet étudiant — tu as lu ses textes, "
+        "ses scénarios, son journal. Tu travailles depuis son corpus et depuis sa propre écriture.\n\n"
+        f"[PEDAGOGICAL METRICS: Dramatic Tension S(t)={tension_score}, Posture={'Maïeutique Pure' if is_maieutic else 'Accompagnement Direct'}]\n\n"
+        "Ton approche :\n"
+        "— Tu poses des questions qui déstabilisent les certitudes sans les détruire.\n"
+        "— Tu exiges que chaque affirmation soit étayée, chaque concept défini avec précision.\n"
+        "— Tu identifies les glissements conceptuels, les contradictions, "
+        "les raccourcis intellectuels non justifiés.\n"
+        "— Tu proposes des pistes depuis le corpus quand c'est pertinent, "
+        "avec la référence exacte entre crochets.\n"
+        "— Tu reconnais la voix de cet étudiant et tu t'y accordes — "
+        "tu adoptes son registre, son rythme, sa façon d'articuler les idées.\n"
+        "— Tu ne flattes pas. Tu stimules. Tu exiges.\n\n"
     )
 
     if is_maieutic:
@@ -204,10 +199,12 @@ async def _chat_handler(request: ChatRequest):
         )
     else:
         system += (
-            "POSTURE D'ACCOMPAGNEMENT DIRECT (Tension critique S(t) atteinte) :\n"
+            "POSTURE D'ACCOMPAGNEMENT DIRECT (Tension critique S(t) atteint) :\n"
             "— L'effort cognitif de l'étudiant est suffisant. Tu peux maintenant être plus explicite, direct et l'aider à conceptualiser.\n"
             "— Valide constructivement ses idées, apporte des pistes directes et accompagne sa synthèse.\n\n"
         )
+
+    system += "Réponds en français. Sois précis, exigeant, et intellectuellement stimulant."
 
     if request.use_corpus:
         if context.strip():
@@ -287,7 +284,6 @@ async def upload_document(file: UploadFile = File(...)):
 
     embeddings = await _get_embeddings(chunks)
 
-    from qdrant_client import models as qmodels
     points = []
     for i, chunk in enumerate(chunks):
         payload = {
@@ -383,7 +379,6 @@ async def delete_document(doc_id: str):
     if not qdrant:
         raise HTTPException(status_code=503, detail="Stockage non configuré.")
     try:
-        from qdrant_client import models as qmodels
         qdrant.delete(
             collection_name="documents",
             points_selector=qmodels.Filter(
@@ -402,7 +397,6 @@ async def get_document_content(doc_id: str):
     if not qdrant:
         raise HTTPException(status_code=503, detail="Stockage non configuré.")
     try:
-        from qdrant_client import models as qmodels
         records, _ = qdrant.scroll(
             collection_name="documents",
             scroll_filter=qmodels.Filter(

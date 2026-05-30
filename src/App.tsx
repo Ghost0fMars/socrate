@@ -519,8 +519,8 @@ export default function App() {
           <History size={18} />
         </button>
         
-        <span className="text-sm tracking-[0.2em] font-serif italic font-semibold text-[#1A1A1A] dark:text-[#ECEAE4] select-none">
-          SOCRATE
+        <span className="text-xs tracking-[0.25em] font-semibold text-[#1A1A1A] dark:text-[#ECEAE4] select-none">
+          S0CR4T3
         </span>
 
         <div className="flex items-center gap-2">

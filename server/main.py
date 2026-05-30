@@ -145,6 +145,7 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
     use_corpus: bool = True
     model: str | None = None
+    doc_id: str | None = None
 
 
 def chunk_text(text: str, chunk_size: int = 360, overlap: int = 60) -> list[str]:
@@ -342,7 +343,7 @@ def _format_chunk(doc: str, meta: dict) -> str:
     return f"[source: {label} | extrait: {chunk}]\n{doc}"
 
 
-def retrieve_context(query: str, n_results: int = 4) -> str:
+def retrieve_context(query: str, n_results: int = 4, doc_id: str | None = None) -> str:
     collection_name, collection_size = get_active_collection()
     _ensure_collection(collection_name, collection_size)
     try:
@@ -359,12 +360,24 @@ def retrieve_context(query: str, n_results: int = 4) -> str:
         print(f"Error getting query embedding in retrieve_context: {exc}", flush=True)
         return ""
 
+    query_filter = None
+    if doc_id:
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="doc_id",
+                    match=models.MatchValue(value=doc_id)
+                )
+            ]
+        )
+
     try:
         with _qdrant_lock:
             results = qdrant_client.query_points(
                 collection_name=collection_name,
                 query=query_embedding,
                 limit=n_results,
+                query_filter=query_filter,
                 with_payload=True,
                 with_vectors=False,
             ).points
@@ -388,41 +401,43 @@ def retrieve_context(query: str, n_results: int = 4) -> str:
 
     collect(results)
 
-    # Keyword boost: when the query names a specific source, prepend its best chunks.
-    try:
-        boosted = _find_boosted_doc_ids(query)
-        for doc_id in boosted:
-            with _qdrant_lock:
-                r = qdrant_client.query_points(
-                    collection_name=collection_name,
-                    query=query_embedding,
-                    limit=3,
-                    query_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="doc_id",
-                                match=models.MatchValue(value=doc_id)
-                            )
-                        ]
-                    ),
-                    with_payload=True,
-                    with_vectors=False,
-                ).points
-            # Insert boosted chunks at the front, skipping distance filter
-            boosted_parts = []
-            for hit in r:
-                meta = hit.payload or {}
-                doc = meta.get("document_content", "")
-                key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                boosted_parts.append(_format_chunk(doc, meta))
-            parts[:0] = boosted_parts  # prepend
-    except Exception as exc:
-        print(f"Error in keyword boost retrieve_context: {exc}", flush=True)
+    if not doc_id:
+        # Keyword boost: when the query names a specific source, prepend its best chunks.
+        try:
+            boosted = _find_boosted_doc_ids(query)
+            for doc_id_boost in boosted:
+                with _qdrant_lock:
+                    r = qdrant_client.query_points(
+                        collection_name=collection_name,
+                        query=query_embedding,
+                        limit=3,
+                        query_filter=models.Filter(
+                            must=[
+                                models.FieldCondition(
+                                    key="doc_id",
+                                    match=models.MatchValue(value=doc_id_boost)
+                                )
+                            ]
+                        ),
+                        with_payload=True,
+                        with_vectors=False,
+                    ).points
+                # Insert boosted chunks at the front, skipping distance filter
+                boosted_parts = []
+                for hit in r:
+                    meta = hit.payload or {}
+                    doc = meta.get("document_content", "")
+                    key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    boosted_parts.append(_format_chunk(doc, meta))
+                parts[:0] = boosted_parts  # prepend
+        except Exception as exc:
+            print(f"Error in keyword boost retrieve_context: {exc}", flush=True)
 
     return "\n\n---\n\n".join(parts)
+
 
 
 # Keywords identifying the user's own writing — used for style reference.
@@ -510,7 +525,7 @@ def is_chat_model(name: str) -> bool:
 async def chat(request: ChatRequest):
     if request.use_corpus:
         context, style_context = await asyncio.gather(
-            asyncio.to_thread(retrieve_context, request.message),
+            asyncio.to_thread(retrieve_context, request.message, doc_id=request.doc_id),
             asyncio.to_thread(retrieve_style_context, request.message),
         )
     else:

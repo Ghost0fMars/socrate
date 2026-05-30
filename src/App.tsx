@@ -346,6 +346,7 @@ export default function App() {
     if (!targetDoc) return;
 
     await handleViewDoc(targetDoc);
+    setReaderTab("text");
 
     setTimeout(() => {
       const element = document.getElementById(`doc-chunk-${chunkIndex}`);
@@ -833,7 +834,7 @@ export default function App() {
                   onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Écrivez votre message..."
                   disabled={isLoading}
-                  className="bg-transparent min-w-0 flex-1 text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
+                  className="bg-transparent min-w-0 flex-1 text-base md:text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
                 />
                 <button
                   type={isLoading ? "button" : "submit"}
@@ -1095,14 +1096,14 @@ export default function App() {
                           <p
                             key={chunkItem.chunk}
                             id={`doc-chunk-${chunkItem.chunk}`}
-                            className="text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] whitespace-pre-wrap transition-all duration-300"
+                            className="text-[15px] md:text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] whitespace-pre-wrap transition-all duration-300"
                           >
                             {chunkItem.content}
                           </p>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] whitespace-pre-wrap">
+                      <p className="text-[15px] md:text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] whitespace-pre-wrap">
                         {docContent}
                       </p>
                     )}
@@ -1193,7 +1194,7 @@ export default function App() {
                       onChange={(e) => setDocInput(e.target.value)}
                       placeholder="Question sur ce texte..."
                       disabled={docLoading}
-                      className="flex-1 bg-transparent text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
+                      className="flex-1 bg-transparent text-base md:text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
                     />
                     <button
                       type={docLoading ? "button" : "submit"}

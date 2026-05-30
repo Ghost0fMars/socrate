@@ -276,6 +276,8 @@ def index_text(
             "category": category,
             "document_content": chunk,
         }
+        if i == 0:
+            payload["full_content"] = text
         points.append(
             models.PointStruct(
                 id=chunk_id,
@@ -853,6 +855,16 @@ async def get_document_content(doc_id: str):
     ]
 
     path_str = meta0.get("path", "")
+    full_content = meta0.get("full_content")
+    if full_content:
+        return {
+            "name": source, 
+            "content": full_content, 
+            "word_count": word_count, 
+            "chunks": len(all_records),
+            "chunks_list": chunks_list
+        }
+
     if path_str:
         p = pathlib.Path(path_str)
         if p.exists():

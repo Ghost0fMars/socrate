@@ -252,24 +252,28 @@ async def upload_document(file: UploadFile = File(...)):
     embeddings = await _get_embeddings(chunks)
 
     from qdrant_client import models as qmodels
-    points = [
-        qmodels.PointStruct(
-            id=str(uuid.uuid4()),
-            vector=embeddings[i],
-            payload={
-                "source": filename,
-                "doc_id": doc_id,
-                "chunk": i + 1,
-                "chunks": len(chunks),
-                "indexed_at": indexed_at,
-                "word_count": word_count,
-                "document_content": chunk,
-                "path": "",
-                "category": "",
-            },
+    points = []
+    for i, chunk in enumerate(chunks):
+        payload = {
+            "source": filename,
+            "doc_id": doc_id,
+            "chunk": i + 1,
+            "chunks": len(chunks),
+            "indexed_at": indexed_at,
+            "word_count": word_count,
+            "document_content": chunk,
+            "path": "",
+            "category": "",
+        }
+        if i == 0:
+            payload["full_content"] = text
+        points.append(
+            qmodels.PointStruct(
+                id=str(uuid.uuid4()),
+                vector=embeddings[i],
+                payload=payload,
+            )
         )
-        for i, chunk in enumerate(chunks)
-    ]
     qdrant.upsert(collection_name="documents", points=points, wait=True)
     return {
         "id": doc_id,
@@ -378,6 +382,25 @@ async def get_document_content(doc_id: str):
             records, key=lambda r: (r.payload or {}).get("chunk", 0)
         )
         meta = sorted_records[0].payload or {}
+        
+        chunks_list = [
+            {
+                "chunk": (r.payload or {}).get("chunk", 0),
+                "content": (r.payload or {}).get("document_content", "")
+            } for r in sorted_records
+        ]
+        
+        full_content = meta.get("full_content")
+        if full_content:
+            return {
+                "id": doc_id,
+                "name": meta.get("source", ""),
+                "content": full_content,
+                "word_count": meta.get("word_count", 0),
+                "chunks": len(sorted_records),
+                "chunks_list": chunks_list,
+            }
+            
         content = "\n\n".join(
             (r.payload or {}).get("document_content", "") for r in sorted_records
         )
@@ -387,6 +410,7 @@ async def get_document_content(doc_id: str):
             "content": content,
             "word_count": meta.get("word_count", 0),
             "chunks": len(sorted_records),
+            "chunks_list": chunks_list,
         }
     except HTTPException:
         raise

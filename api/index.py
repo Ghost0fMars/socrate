@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+from api.metrics.dramatic_integral import calculate_dramatic_tension
 
 app = FastAPI()
 
@@ -180,21 +181,56 @@ async def _chat_handler(request: ChatRequest):
             status_code=503,
         )
     model = request.model or OPENAI_MODEL
-    system = _SYSTEM_PROMPT
+    
     context = await _retrieve_context(request.message, request.doc_id) if request.use_corpus else ""
 
-    if context:
+    # Calculate Pedagogical Dramatic Tension S(t)
+    history_list = [{"role": msg.role, "content": msg.content} for msg in request.history]
+    tension_metrics = calculate_dramatic_tension(history_list, request.message, context)
+    is_maieutic = tension_metrics["maieutic_posture"]
+    tension_score = tension_metrics["tension_score"]
+
+    system = (
+        _SYSTEM_PROMPT
+        + f"\n\n[PEDAGOGICAL METRICS: Dramatic Tension S(t)={tension_score}, Posture={'Maïeutique Pure' if is_maieutic else 'Accompagnement Direct'}]\n\n"
+    )
+
+    if is_maieutic:
         system += (
-            "\n\nCorpus de recherche. Utilise ces extraits seulement s'ils sont pertinents. "
-            "Cite la source entre crochets avec le nom du fichier. "
-            "Si le corpus est insuffisant, dis-le et propose une piste sans inventer de référence.\n\n"
-            + context
+            "POSTURE MAÏEUTIQUE STRICTE (Tension cumulée S(t) faible) :\n"
+            "— Tu REFUSES catégoriquement de donner des réponses directes, de faire des résumés ou de valider platement les concepts.\n"
+            "— Tu réponds uniquement par des relances maïeutiques, en pointant les contradictions ou en renvoyant l'étudiant à ses propres notes passées.\n"
+            "— Provoque le déclic par l'effort cognitif et la problématisation.\n\n"
         )
     else:
         system += (
-            "\n\nAucun extrait de corpus pertinent pour cette requête. "
-            "Tu peux aider à raisonner et à problématiser, "
-            "mais ne te réfère pas à des documents non indexés."
+            "POSTURE D'ACCOMPAGNEMENT DIRECT (Tension critique S(t) atteinte) :\n"
+            "— L'effort cognitif de l'étudiant est suffisant. Tu peux maintenant être plus explicite, direct et l'aider à conceptualiser.\n"
+            "— Valide constructivement ses idées, apporte des pistes directes et accompagne sa synthèse.\n\n"
+        )
+
+    if request.use_corpus:
+        if context.strip():
+            system += (
+                "\n\nCorpus de recherche. Utilise uniquement ces extraits pour répondre. "
+                "Cite obligatoirement la source exacte entre crochets avec le nom du fichier. "
+                "Si les extraits fournis ne contiennent pas d'information ou de référence précise pour répondre à la question de l'étudiant, "
+                "tu dois IMPÉRATIVEMENT refuser de répondre sur le fond et lui demander poliment de te transmettre le document concerné "
+                "ou de l'ajouter à son corpus afin que vous puissiez dialoguer ensemble sur cette base.\n\n"
+                + context
+            )
+        else:
+            system += (
+                "\n\nIMPORTANT (Corpus manquant/insuffisant) : Tu ne disposes d'AUCUN extrait de corpus pertinent pour cette requête. "
+                "Tu as l'interdiction formelle de répondre sur le fond de la question ou d'inventer des faits. "
+                "Tu dois obligatoirement et poliment déclarer que tu n'as pas trouvé cette référence dans tes documents, "
+                "et demander à l'utilisateur de te transmettre le fichier concerné ou de l'ajouter à son corpus afin de pouvoir engager le dialogue."
+            )
+    else:
+        system += (
+            "\n\nIMPORTANT : Le corpus n'est pas actif pour cette requête. "
+            "Tu dois impérativement rappeler à l'utilisateur qu'il doit activer son corpus ou te transmettre un document "
+            "pour pouvoir engager un dialogue d'analyse de recherche."
         )
 
     messages = [{"role": "system", "content": system}]

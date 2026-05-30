@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, Menu } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -109,6 +109,7 @@ export default function App() {
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
 
   const [viewingDoc, setViewingDoc] = useState<Document | null>(null);
+  const [readerTab, setReaderTab] = useState<"text" | "chat">("text");
   const [docContent, setDocContent] = useState("");
   const [docChunks, setDocChunks] = useState<any[]>([]);
   const [docContentLoading, setDocContentLoading] = useState(false);
@@ -317,6 +318,7 @@ export default function App() {
 
   const handleViewDoc = async (doc: Document) => {
     setViewingDoc(doc);
+    setReaderTab("text");
     setDocContent("");
     setDocChunks([]);
     setDocMessages([]);
@@ -506,322 +508,377 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#FDFCFA] text-[#1A1A1A] overflow-hidden">
-      {/* Left Navigation */}
-      <nav className="hidden md:flex w-20 border-r border-[#E5E2DD] flex-col items-center justify-between py-10 shrink-0">
-        <div className="flex flex-col items-center gap-8">
-          <div className="w-8 h-8 rounded-full bg-black flex items-center justify-center">
-            <div className="w-3 h-3 bg-white rotate-45"></div>
-          </div>
-          <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase [writing-mode:vertical-rl] rotate-180">
-            S0CR4T3
-          </span>
-        </div>
+    <div className="flex flex-col h-screen w-full bg-[#FDFCFA] text-[#1A1A1A] overflow-hidden">
+      {/* Mobile Header */}
+      <header className="md:hidden h-14 border-b border-[#E5E2DD] bg-[#FDFCFA] dark:bg-[#0D0D0C] flex items-center justify-between px-4 shrink-0 z-20">
+        <button
+          onClick={() => setShowHistory((v) => !v)}
+          className="p-2 text-[#8C8C8C] hover:text-black dark:text-[#A6A196] dark:hover:text-white transition-colors"
+          title="Historique"
+        >
+          <History size={18} />
+        </button>
+        
+        <span className="text-sm tracking-[0.2em] font-serif italic font-semibold text-[#1A1A1A] dark:text-[#ECEAE4] select-none">
+          SOCRATE
+        </span>
 
-        <div className="flex flex-col items-center gap-6">
-          {/* Toggle Theme */}
+        <div className="flex items-center gap-2">
           <button
             onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+            className="p-2 text-[#8C8C8C] hover:text-black dark:text-[#A6A196] dark:hover:text-white transition-colors"
             title={theme === "light" ? "Mode Sombre" : "Mode Clair"}
-            className="flex flex-col items-center gap-1 group transition-transform hover:scale-105 active:scale-95 cursor-pointer"
           >
-            {theme === "light" ? (
-              <Moon
+            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+          </button>
+          
+          <button
+            onClick={() => setShowDocs((v) => !v)}
+            className="p-2 text-[#8C8C8C] hover:text-black dark:text-[#A6A196] dark:hover:text-white transition-colors"
+            title="Documents"
+          >
+            <FileText size={18} />
+          </button>
+        </div>
+      </header>
+
+      {/* App Body Container */}
+      <div className="flex flex-1 w-full overflow-hidden relative">
+        {/* Left Navigation */}
+        <nav className="hidden md:flex w-20 border-r border-[#E5E2DD] flex-col items-center justify-between py-10 shrink-0">
+          <div className="flex flex-col items-center gap-8">
+            <div className="w-8 h-8 rounded-full bg-black flex items-center justify-center">
+              <div className="w-3 h-3 bg-white rotate-45"></div>
+            </div>
+            <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase [writing-mode:vertical-rl] rotate-180">
+              S0CR4T3
+            </span>
+          </div>
+
+          <div className="flex flex-col items-center gap-6">
+            {/* Toggle Theme */}
+            <button
+              onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+              title={theme === "light" ? "Mode Sombre" : "Mode Clair"}
+              className="flex flex-col items-center gap-1 group transition-transform hover:scale-105 active:scale-95 cursor-pointer"
+            >
+              {theme === "light" ? (
+                <Moon
+                  size={18}
+                  className="text-[#CBC7C0] group-hover:text-black transition-colors"
+                />
+              ) : (
+                <Sun
+                  size={18}
+                  className="text-[#8C8C8C] group-hover:text-white transition-colors"
+                />
+              )}
+            </button>
+
+            {/* New conversation */}
+            <button
+              onClick={handleNewConversation}
+              title="Nouvelle conversation"
+              className="flex flex-col items-center gap-1 group"
+            >
+              <Plus
                 size={18}
                 className="text-[#CBC7C0] group-hover:text-black transition-colors"
               />
-            ) : (
-              <Sun
+            </button>
+
+            {/* History toggle */}
+            <button
+              onClick={() => { setShowHistory((v) => !v); setShowDocs(false); }}
+              title="Historique"
+              className="relative flex flex-col items-center gap-1 group"
+            >
+              <History
                 size={18}
-                className="text-[#8C8C8C] group-hover:text-white transition-colors"
+                className={`transition-colors ${showHistory ? "text-black" : "text-[#CBC7C0] group-hover:text-black"}`}
               />
-            )}
-          </button>
-
-          {/* New conversation */}
-          <button
-            onClick={handleNewConversation}
-            title="Nouvelle conversation"
-            className="flex flex-col items-center gap-1 group"
-          >
-            <Plus
-              size={18}
-              className="text-[#CBC7C0] group-hover:text-black transition-colors"
-            />
-          </button>
-
-          {/* History toggle */}
-          <button
-            onClick={() => { setShowHistory((v) => !v); setShowDocs(false); }}
-            title="Historique"
-            className="relative flex flex-col items-center gap-1 group"
-          >
-            <History
-              size={18}
-              className={`transition-colors ${showHistory ? "text-black" : "text-[#CBC7C0] group-hover:text-black"}`}
-            />
-            {conversations.length > 0 && (
-              <span className="text-[9px] font-bold tracking-widest text-[#8C8C8C]">
-                {conversations.length}
-              </span>
-            )}
-          </button>
-
-          {/* Document toggle */}
-          <button
-            onClick={() => { setShowDocs((v) => !v); setShowHistory(false); }}
-            title="Documents indexés"
-            className="relative flex flex-col items-center gap-1 group"
-          >
-            <FileText
-              size={18}
-              className={`transition-colors ${showDocs ? "text-black" : "text-[#CBC7C0] group-hover:text-black"}`}
-            />
-            {documents.length > 0 && (
-              <span className="text-[9px] font-bold tracking-widest text-[#8C8C8C]">
-                {documents.length}
-              </span>
-            )}
-          </button>
-
-          <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
-          <div className="w-1.5 h-1.5 rounded-full bg-black"></div>
-          <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
-        </div>
-      </nav>
-
-      {/* History Panel */}
-      <AnimatePresence>
-        {showHistory && (
-          <motion.aside
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 280, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={{ ease: "easeInOut", duration: 0.3 }}
-            className="border-r border-[#E5E2DD] flex flex-col overflow-hidden shrink-0 bg-[#FDFCFA]"
-          >
-            <div className="flex items-center justify-between px-6 py-6 border-b border-[#E5E2DD]">
-              <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
-                Historique
-              </span>
-              <button
-                onClick={() => setShowHistory(false)}
-                className="text-[#CBC7C0] hover:text-black transition-colors"
-              >
-                <X size={14} />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-4 space-y-1">
-              {conversations.length === 0 ? (
-                <p className="text-[11px] text-[#CBC7C0] italic mt-4 px-2">
-                  Aucune conversation sauvegardée.
-                </p>
-              ) : (
-                conversations
-                  .slice()
-                  .sort((a, b) => b.updatedAt - a.updatedAt)
-                  .map((conv) => (
-                    <div
-                      key={conv.id}
-                      onClick={() => handleLoadConversation(conv)}
-                      className={`flex items-start justify-between gap-2 px-3 py-3 rounded-sm cursor-pointer group transition-colors ${
-                        currentConvId === conv.id
-                          ? "bg-[#F0EDE9]"
-                          : "hover:bg-[#F5F2EF]"
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[12px] text-[#1A1A1A] truncate leading-snug">
-                          {conv.title}
-                        </p>
-                        <p className="text-[10px] text-[#CBC7C0] mt-1">
-                          {getModelLabel(conv.model)} · {formatDate(conv.updatedAt)}
-                        </p>
-                      </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDeleteConversation(conv.id); }}
-                        className="text-[#E5E2DD] hover:text-red-400 transition-colors shrink-0 opacity-0 group-hover:opacity-100 mt-0.5"
-                        title="Supprimer"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  ))
+              {conversations.length > 0 && (
+                <span className="text-[9px] font-bold tracking-widest text-[#8C8C8C]">
+                  {conversations.length}
+                </span>
               )}
-            </div>
-          </motion.aside>
-        )}
-      </AnimatePresence>
+            </button>
 
-      {/* Main Chat */}
-      <main className="flex-1 flex flex-col relative h-full min-w-0">
+            {/* Document toggle */}
+            <button
+              onClick={() => { setShowDocs((v) => !v); setShowHistory(false); }}
+              title="Documents indexés"
+              className="relative flex flex-col items-center gap-1 group"
+            >
+              <FileText
+                size={18}
+                className={`transition-colors ${showDocs ? "text-black" : "text-[#CBC7C0] group-hover:text-black"}`}
+              />
+              {documents.length > 0 && (
+                <span className="text-[9px] font-bold tracking-widest text-[#8C8C8C]">
+                  {documents.length}
+                </span>
+              )}
+            </button>
 
-        <div className="flex-1 overflow-y-auto no-scrollbar px-6 md:px-32 py-16 space-y-24 scroll-smooth">
-          <AnimatePresence initial={false}>
-            {messages.map((message) => (
-              <motion.div
-                key={message.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`flex w-full ${message.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                <div
-                  className={`max-w-2xl w-full group/msg ${message.role === "user" ? "text-right ml-auto" : "text-left mr-auto"}`}
+            <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
+            <div className="w-1.5 h-1.5 rounded-full bg-black"></div>
+            <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
+          </div>
+        </nav>
+
+        {/* Backdrop overlay for mobile when History or Docs are open */}
+        <AnimatePresence>
+          {(showHistory || showDocs) && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.4 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setShowHistory(false);
+                setShowDocs(false);
+              }}
+              className="md:hidden fixed inset-0 z-30 bg-black/40 backdrop-blur-xs"
+            />
+          )}
+        </AnimatePresence>
+
+        {/* History Panel */}
+        <AnimatePresence>
+          {showHistory && (
+            <motion.aside
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 280, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ ease: "easeInOut", duration: 0.3 }}
+              className="border-r border-[#E5E2DD] flex flex-col overflow-hidden shrink-0 bg-[#FDFCFA] fixed md:static inset-y-0 left-0 z-40 w-[280px] md:w-[280px] shadow-2xl md:shadow-none h-full"
+            >
+              <div className="flex items-center justify-between px-6 py-6 border-b border-[#E5E2DD]">
+                <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
+                  Historique
+                </span>
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="text-[#CBC7C0] hover:text-black transition-colors"
                 >
-                  <div className="flex items-center justify-between mb-4">
-                    <p className="text-[10px] tracking-widest text-[#8C8C8C] uppercase font-semibold">
-                      {message.role === "user" ? "Vous" : "L'Esprit"}
-                    </p>
-                    {message.role === "model" && (
-                      <button
-                        onClick={() => handleExport(message.content)}
-                        title="Exporter en .txt"
-                        className="opacity-0 group-hover/msg:opacity-100 transition-opacity text-[#CBC7C0] hover:text-black"
+                  <X size={14} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-4 space-y-1">
+                {conversations.length === 0 ? (
+                  <p className="text-[11px] text-[#CBC7C0] italic mt-4 px-2">
+                    Aucune conversation sauvegardée.
+                  </p>
+                ) : (
+                  conversations
+                    .slice()
+                    .sort((a, b) => b.updatedAt - a.updatedAt)
+                    .map((conv) => (
+                      <div
+                        key={conv.id}
+                        onClick={() => handleLoadConversation(conv)}
+                        className={`flex items-start justify-between gap-2 px-3 py-3 rounded-sm cursor-pointer group transition-colors ${
+                          currentConvId === conv.id
+                            ? "bg-[#F0EDE9]"
+                            : "hover:bg-[#F5F2EF]"
+                        }`}
                       >
-                        <Download size={13} />
-                      </button>
-                    )}
-                  </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[12px] text-[#1A1A1A] truncate leading-snug">
+                            {conv.title}
+                          </p>
+                          <p className="text-[10px] text-[#CBC7C0] mt-1">
+                            {getModelLabel(conv.model)} · {formatDate(conv.updatedAt)}
+                          </p>
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteConversation(conv.id); }}
+                          className="text-[#E5E2DD] hover:text-red-400 transition-colors shrink-0 opacity-0 group-hover:opacity-100 mt-0.5"
+                          title="Supprimer"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))
+                )}
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
+
+        {/* Main Chat */}
+        <main className="flex-1 flex flex-col relative h-full min-w-0">
+          <div className="flex-1 overflow-y-auto no-scrollbar px-6 md:px-32 py-8 md:py-16 space-y-12 md:space-y-24 scroll-smooth">
+            <AnimatePresence initial={false}>
+              {messages.map((message) => (
+                <motion.div
+                  key={message.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={`flex w-full ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                >
                   <div
-                    className={`markdown-body ${message.role === "user" ? "text-2xl font-light leading-snug" : "text-lg leading-relaxed font-light"}`}
+                    className={`max-w-2xl w-full group/msg ${message.role === "user" ? "text-right ml-auto" : "text-left mr-auto"}`}
                   >
-                    {message.role === "user" ? (
-                      <span className="font-light">{message.content}</span>
-                    ) : (
-                      <Markdown
-                        components={{
-                          a: ({ href, children, ...props }) => {
-                            if (href && href.startsWith("#citation-")) {
-                              const parts = href.replace("#citation-", "").split("-");
-                              const docName = decodeURIComponent(parts[0]);
-                              const chunkIndex = parseInt(parts[1], 10);
+                    <div className="flex items-center justify-between mb-4">
+                      <p className="text-[10px] tracking-widest text-[#8C8C8C] uppercase font-semibold">
+                        {message.role === "user" ? "Vous" : "L'Esprit"}
+                      </p>
+                      {message.role === "model" && (
+                        <button
+                          onClick={() => handleExport(message.content)}
+                          title="Exporter en .txt"
+                          className="opacity-0 group-hover/msg:opacity-100 transition-opacity text-[#CBC7C0] hover:text-black"
+                        >
+                          <Download size={13} />
+                        </button>
+                      )}
+                    </div>
+                    <div
+                      className={`markdown-body ${message.role === "user" ? "text-xl md:text-2xl font-light leading-snug" : "text-base md:text-lg leading-relaxed font-light"}`}
+                    >
+                      {message.role === "user" ? (
+                        <span className="font-light">{message.content}</span>
+                      ) : (
+                        <Markdown
+                          components={{
+                            a: ({ href, children, ...props }) => {
+                              if (href && href.startsWith("#citation-")) {
+                                const parts = href.replace("#citation-", "").split("-");
+                                const docName = decodeURIComponent(parts[0]);
+                                const chunkIndex = parseInt(parts[1], 10);
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setShowDocs(true);
+                                      handleCitationClick(docName, chunkIndex);
+                                    }}
+                                    className="inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 rounded bg-[#F5F2EF] hover:bg-[#E5E2DD] text-[#4A4A4A] dark:bg-[#20201D] dark:hover:bg-[#2E2E2A] dark:text-[#ECEAE4] border border-[#E5E2DD] dark:border-[#2D2D29] text-[11px] font-semibold cursor-pointer transition-colors shadow-sm"
+                                  >
+                                    <BookOpen size={10} className="text-[#8C8C8C] shrink-0" />
+                                    <span className="font-serif italic truncate max-w-28">{docName.split('.')[0]}</span>
+                                    <span className="text-[9px] text-[#8C8C8C] dark:text-[#A6A196]">p. {chunkIndex}</span>
+                                  </button>
+                                );
+                              }
                               return (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setShowDocs(true);
-                                    handleCitationClick(docName, chunkIndex);
-                                  }}
-                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 rounded bg-[#F5F2EF] hover:bg-[#E5E2DD] text-[#4A4A4A] dark:bg-[#20201D] dark:hover:bg-[#2E2E2A] dark:text-[#ECEAE4] border border-[#E5E2DD] dark:border-[#2D2D29] text-[11px] font-semibold cursor-pointer transition-colors shadow-sm"
+                                <a
+                                  href={href}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="underline text-black dark:text-white font-medium hover:opacity-80"
+                                  {...props}
                                 >
-                                  <BookOpen size={10} className="text-[#8C8C8C] shrink-0" />
-                                  <span className="font-serif italic truncate max-w-28">{docName.split('.')[0]}</span>
-                                  <span className="text-[9px] text-[#8C8C8C] dark:text-[#A6A196]">p. {chunkIndex}</span>
-                                </button>
+                                  {children}
+                                </a>
                               );
                             }
-                            return (
-                              <a
-                                href={href}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="underline text-black dark:text-white font-medium hover:opacity-80"
-                                {...props}
-                              >
-                                {children}
-                              </a>
-                            );
-                          }
-                        }}
-                      >
-                        {processCitations(message.content)}
-                      </Markdown>
-                    )}
+                          }}
+                        >
+                          {processCitations(message.content)}
+                        </Markdown>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-          <div ref={scrollRef} />
-        </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            <div ref={scrollRef} />
+          </div>
 
-        <div className="h-24 md:h-28 px-6 md:px-24 flex items-center border-t border-[#E5E2DD] bg-[#FDFCFA]">
-          <form
-            onSubmit={handleSubmit}
-            className="w-full flex items-center gap-4 group"
-          >
-            <button
-              type="button"
-              onClick={() => setUseCorpus((v) => !v)}
-              disabled={documents.length === 0}
-              title={useCorpus ? "Corpus actif" : "Corpus inactif"}
-              className={`h-8 w-8 shrink-0 border flex items-center justify-center transition-colors disabled:opacity-30 ${
-                useCorpus && documents.length > 0
-                  ? "border-black text-black bg-[#F5F2EF]"
-                  : "border-[#E5E2DD] text-[#CBC7C0] hover:text-black"
-              }`}
+          <div className="h-auto min-h-20 py-4 md:py-0 md:h-28 px-6 md:px-24 flex items-center border-t border-[#E5E2DD] bg-[#FDFCFA]">
+            <form
+              onSubmit={handleSubmit}
+              className="w-full flex flex-col md:flex-row md:items-center gap-3 md:gap-4 group"
             >
-              <BookOpen size={13} />
-            </button>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              disabled={models.length === 0 || isLoading}
-              title="Modele Ollama"
-              className="h-8 max-w-40 shrink-0 border border-[#E5E2DD] bg-transparent px-2 text-[10px] tracking-widest uppercase text-[#8C8C8C] outline-none transition-colors hover:border-[#CBC7C0] disabled:opacity-30"
-            >
-              {models.length === 0 ? (
-                <option value="">Aucun modele</option>
-              ) : (
-                models.map((model) => (
-                  <option key={model.name} value={model.name}>
-                    {getModelLabel(model.name)}
-                  </option>
-                ))
-              )}
-            </select>
-            <input
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              placeholder=""
-              disabled={isLoading}
-              className="bg-transparent min-w-0 flex-1 text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
-            />
-            <button
-              type={isLoading ? "button" : "submit"}
-              onClick={isLoading ? handleStop : undefined}
-              disabled={!isLoading && !inputValue.trim()}
-              className={`ml-auto flex items-center gap-3 text-[10px] tracking-[0.18em] font-bold transition-colors disabled:opacity-20 uppercase whitespace-nowrap ${
-                isLoading
-                  ? "text-red-400 hover:text-red-500"
-                  : "group-hover:text-black text-[#8C8C8C]"
-              }`}
-            >
-              {isLoading ? (
-                "STOP"
-              ) : (
-                "ENVOYER"
-              )}
-              <div className="w-6 md:w-12 h-[1px] bg-current"></div>
-            </button>
-          </form>
-        </div>
-      </main>
+              <div className="flex items-center gap-3 md:gap-4 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setUseCorpus((v) => !v)}
+                  disabled={documents.length === 0}
+                  title={useCorpus ? "Corpus actif" : "Corpus inactif"}
+                  className={`h-8 w-8 shrink-0 border flex items-center justify-center transition-colors disabled:opacity-30 ${
+                    useCorpus && documents.length > 0
+                      ? "border-black text-black bg-[#F5F2EF]"
+                      : "border-[#E5E2DD] text-[#CBC7C0] hover:text-black"
+                  }`}
+                >
+                  <BookOpen size={13} />
+                </button>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  disabled={models.length === 0 || isLoading}
+                  title="Modele Ollama"
+                  className="h-8 max-w-40 shrink-0 border border-[#E5E2DD] bg-transparent px-2 text-[10px] tracking-widest uppercase text-[#8C8C8C] outline-none transition-colors hover:border-[#CBC7C0] disabled:opacity-30 animate-none bg-[#FDFCFA] dark:bg-[#0D0D0C]"
+                >
+                  {models.length === 0 ? (
+                    <option value="">Aucun modele</option>
+                  ) : (
+                    models.map((model) => (
+                      <option key={model.name} value={model.name}>
+                        {getModelLabel(model.name)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
 
-      {/* Document Panel */}
-      <AnimatePresence>
-        {showDocs && (
-          <motion.aside
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 320, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={{ ease: "easeInOut", duration: 0.3 }}
-            className="border-l border-[#E5E2DD] flex flex-col overflow-hidden shrink-0 bg-[#FDFCFA]"
-          >
-            {/* Panel header */}
-            <div className="flex items-center justify-between px-6 py-6 border-b border-[#E5E2DD]">
-              <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
-                Corpus
-              </span>
-              <button
-                onClick={() => setShowDocs(false)}
-                className="text-[#CBC7C0] hover:text-black transition-colors"
-              >
-                <X size={14} />
-              </button>
-            </div>
+              <div className="flex-1 flex items-center gap-3 md:gap-4 min-w-0">
+                <input
+                  type="text"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  placeholder="Écrivez votre message..."
+                  disabled={isLoading}
+                  className="bg-transparent min-w-0 flex-1 text-[11px] font-light placeholder:italic placeholder:text-[#CBC7C0] outline-none disabled:opacity-30"
+                />
+                <button
+                  type={isLoading ? "button" : "submit"}
+                  onClick={isLoading ? handleStop : undefined}
+                  disabled={!isLoading && !inputValue.trim()}
+                  className={`ml-auto flex items-center gap-3 text-[10px] tracking-[0.18em] font-bold transition-colors disabled:opacity-20 uppercase whitespace-nowrap ${
+                    isLoading
+                      ? "text-red-400 hover:text-red-500"
+                      : "group-hover:text-black text-[#8C8C8C]"
+                  }`}
+                >
+                  {isLoading ? (
+                    "STOP"
+                  ) : (
+                    "ENVOYER"
+                  )}
+                  <div className="w-6 md:w-12 h-[1px] bg-current"></div>
+                </button>
+              </div>
+            </form>
+          </div>
+        </main>
+
+        {/* Document Panel */}
+        <AnimatePresence>
+          {showDocs && (
+            <motion.aside
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 320, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ ease: "easeInOut", duration: 0.3 }}
+              className="border-l border-[#E5E2DD] flex flex-col overflow-hidden shrink-0 bg-[#FDFCFA] fixed md:static inset-y-0 right-0 z-40 w-full sm:w-[320px] md:w-[320px] shadow-2xl md:shadow-none h-full"
+            >
+              {/* Panel header */}
+              <div className="flex items-center justify-between px-6 py-6 border-b border-[#E5E2DD]">
+                <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
+                  Corpus
+                </span>
+                <button
+                  onClick={() => setShowDocs(false)}
+                  className="text-[#CBC7C0] hover:text-black transition-colors"
+                >
+                  <X size={14} />
+                </button>
+              </div>
 
             <div className="grid grid-cols-3 border-b border-[#E5E2DD]">
               <div className="px-4 py-4 border-r border-[#E5E2DD]">
@@ -961,6 +1018,7 @@ export default function App() {
           </motion.aside>
         )}
       </AnimatePresence>
+      </div>
       {/* Document Reader Modal */}
       <AnimatePresence>
         {viewingDoc && (
@@ -993,10 +1051,38 @@ export default function App() {
               </button>
             </div>
 
+            {/* Tabs for mobile */}
+            <div className="md:hidden flex border-b border-[#E5E2DD] bg-[#FDFCFA] shrink-0">
+              <button
+                type="button"
+                onClick={() => setReaderTab("text")}
+                className={`flex-1 py-3 text-[10px] tracking-widest uppercase font-bold transition-colors border-b-2 ${
+                  readerTab === "text"
+                    ? "border-black text-black"
+                    : "border-transparent text-[#CBC7C0]"
+                }`}
+              >
+                Texte
+              </button>
+              <button
+                type="button"
+                onClick={() => setReaderTab("chat")}
+                className={`flex-1 py-3 text-[10px] tracking-widest uppercase font-bold transition-colors border-b-2 ${
+                  readerTab === "chat"
+                    ? "border-black text-black"
+                    : "border-transparent text-[#CBC7C0]"
+                }`}
+              >
+                Dialogue
+              </button>
+            </div>
+
             {/* Two-pane layout */}
             <div className="flex flex-1 overflow-hidden">
               {/* Left: document text */}
-              <div className="flex-1 overflow-y-auto no-scrollbar px-12 py-12 border-r border-[#E5E2DD]">
+              <div className={`flex-1 overflow-y-auto no-scrollbar px-6 md:px-12 py-6 md:py-12 border-r border-[#E5E2DD] ${
+                readerTab === "text" ? "block" : "hidden md:block"
+              }`}>
                 {docContentLoading ? (
                   <div className="flex items-center justify-center h-full">
                     <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
@@ -1025,7 +1111,9 @@ export default function App() {
               </div>
 
               {/* Right: inline AI conversation */}
-              <div className="w-96 flex flex-col shrink-0">
+              <div className={`w-full md:w-96 flex flex-col shrink-0 ${
+                readerTab === "chat" ? "flex" : "hidden md:flex"
+              }`}>
                 <div className="px-5 py-4 border-b border-[#E5E2DD] shrink-0">
                   <p className="text-[9px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
                     Dialogue

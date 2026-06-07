@@ -9,7 +9,7 @@ if not exist ".venv" (
 )
 
 echo Installation des dépendances...
-.venv\Scripts\pip install -q -r requirements.txt
+.venv\Scripts\python.exe -m pip install -q -r requirements.txt
 
 echo Démarrage du serveur sur http://localhost:8000
-.venv\Scripts\uvicorn main:app --port 8000
+.venv\Scripts\python.exe -m uvicorn main:app --port 8000

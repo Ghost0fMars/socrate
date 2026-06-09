@@ -195,13 +195,15 @@ def delete_existing_path(path: pathlib.Path) -> None:
         with _qdrant_lock:
             qdrant_client.delete(
                 collection_name=collection_name,
-                points_selector=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="path",
-                            match=models.MatchValue(value=str(path))
-                        )
-                    ]
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="path",
+                                match=models.MatchValue(value=str(path))
+                            )
+                        ]
+                    )
                 )
             )
     except Exception:
@@ -952,13 +954,15 @@ async def delete_document(doc_id: str):
 
         qdrant_client.delete(
             collection_name=collection_name,
-            points_selector=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="doc_id",
-                        match=models.MatchValue(value=doc_id)
-                    )
-                ]
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="doc_id",
+                            match=models.MatchValue(value=doc_id)
+                        )
+                    ]
+                )
             )
         )
     except HTTPException:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import pathlib
@@ -16,7 +17,7 @@ from docx import Document as DocxDocument
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from openai import AsyncOpenAI
+from openai import OpenAI
 import pypdf
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient, models as qmodels
@@ -47,7 +48,7 @@ OPENAI_MODEL = _MODEL_FIXES.get(_RAW_MODEL, _RAW_MODEL)
 EMBED_MODEL = "text-embedding-3-small"
 VECTOR_SIZE = 1536
 
-_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_client: OpenAI | None = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
 _qdrant = None
@@ -103,7 +104,7 @@ def chunk_text(text: str, chunk_size: int = 360, overlap: int = 60) -> list[str]
 async def _get_embeddings(texts: list[str]) -> list[list[float]]:
     if not _client:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY non configuré.")
-    resp = await _client.embeddings.create(model=EMBED_MODEL, input=texts)
+    resp = await asyncio.to_thread(_client.embeddings.create, model=EMBED_MODEL, input=texts)
     return [d.embedding for d in resp.data]
 
 
@@ -237,8 +238,8 @@ async def _chat_handler(request: ChatRequest):
     messages.append({"role": "user", "content": request.message})
 
     try:
-        response = await _client.chat.completions.create(
-            model=model, messages=messages, stream=False
+        response = await asyncio.to_thread(
+            _client.chat.completions.create, model=model, messages=messages
         )
         return PlainTextResponse(response.choices[0].message.content or "")
     except Exception as e:

@@ -5,6 +5,20 @@ const API =
     ? (import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
     : '/api';
 
+// Injected by App.tsx once the user is authenticated.
+let _tokenGetter: (() => Promise<string | null>) | null = null;
+
+export function setTokenGetter(getter: (() => Promise<string | null>) | null) {
+  _tokenGetter = getter;
+}
+
+async function authHeaders(): Promise<HeadersInit> {
+  if (!_tokenGetter) return {};
+  const token = await _tokenGetter();
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
 interface HistoryEntry {
   role: string;
   content: string;
@@ -25,7 +39,7 @@ export async function* sendMessageStream(
 
   const response = await fetch(`${API}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({
       message: prompt,
       history: messages,
@@ -94,6 +108,7 @@ export async function uploadDocument(
   body.append("file", file);
   const response = await fetch(`${API}/documents/upload`, {
     method: "POST",
+    headers: await authHeaders(),
     body,
   });
   if (!response.ok) {
@@ -104,13 +119,13 @@ export async function uploadDocument(
 }
 
 export async function listDocuments(): Promise<Document[]> {
-  const response = await fetch(`${API}/documents`);
+  const response = await fetch(`${API}/documents`, { headers: await authHeaders() });
   if (!response.ok) throw new Error("Impossible de charger les documents.");
   return response.json();
 }
 
 export async function getCorpusStats(): Promise<CorpusStats> {
-  const response = await fetch(`${API}/documents/stats`);
+  const response = await fetch(`${API}/documents/stats`, { headers: await authHeaders() });
   if (!response.ok) throw new Error("Impossible de charger le corpus.");
   return response.json();
 }
@@ -118,6 +133,7 @@ export async function getCorpusStats(): Promise<CorpusStats> {
 export async function startIndexCorpus(): Promise<void> {
   const response = await fetch(`${API}/documents/index-corpus`, {
     method: "POST",
+    headers: await authHeaders(),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
@@ -134,19 +150,22 @@ export interface IndexStatus {
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {
-  const response = await fetch(`${API}/documents/index-corpus/status`);
+  const response = await fetch(`${API}/documents/index-corpus/status`, { headers: await authHeaders() });
   if (!response.ok) throw new Error("Impossible de vérifier le statut.");
   return response.json();
 }
 
 export async function listModels(): Promise<ModelsResponse> {
-  const response = await fetch(`${API}/models`);
+  const response = await fetch(`${API}/models`, { headers: await authHeaders() });
   if (!response.ok) throw new Error("Impossible de charger les modeles.");
   return response.json();
 }
 
 export async function deleteDocument(id: string): Promise<void> {
-  const response = await fetch(`${API}/documents/${id}`, { method: "DELETE" });
+  const response = await fetch(`${API}/documents/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
   if (!response.ok) throw new Error("Impossible de supprimer le document.");
 }
 
@@ -165,7 +184,7 @@ export interface DocumentContent {
 }
 
 export async function getDocumentContent(id: string): Promise<DocumentContent> {
-  const response = await fetch(`${API}/documents/${id}/content`);
+  const response = await fetch(`${API}/documents/${id}/content`, { headers: await authHeaders() });
   if (!response.ok) throw new Error("Impossible de charger le contenu du document.");
   return response.json();
 }

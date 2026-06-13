@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, Menu } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, LogOut } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -17,10 +17,21 @@ import {
   getIndexStatus,
   listModels,
   getDocumentContent,
+  setTokenGetter,
   type Document,
   type CorpusStats,
   type ModelInfo,
 } from "./lib/api";
+import { useAuth } from "./lib/auth";
+import {
+  fsLoadConversations,
+  fsSaveConversation,
+  fsDeleteConversation,
+  fsLoadPreferences,
+  fsSavePreferences,
+  type FSConversation,
+} from "./lib/firestore";
+import AuthScreen from "./components/AuthScreen";
 
 interface Message {
   id: string;
@@ -34,20 +45,6 @@ interface Conversation {
   model: string;
   messages: Message[];
   updatedAt: number;
-}
-
-const STORAGE_KEY = "socrate_conversations";
-
-function loadConversations(): Conversation[] {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
-
-function persistConversations(convs: Conversation[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(convs));
 }
 
 const MODEL_LABELS: Record<string, string> = {
@@ -68,10 +65,16 @@ const MODEL_LABELS: Record<string, string> = {
 const getModelLabel = (name: string) => MODEL_LABELS[name] ?? name;
 
 export default function App() {
-  const [theme, setTheme] = useState(() => localStorage.getItem("socrate_theme") ?? "light");
+  const { user, loading: authLoading, logOut, getToken } = useAuth();
+
+  const [theme, setTheme] = useState("light");
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
+  // Track whether preferences have been loaded from Firestore to avoid
+  // writing back defaults before the load completes.
+  const prefsLoadedRef = useRef(false);
 
   useEffect(() => {
     if (theme === "dark") {
@@ -79,8 +82,8 @@ export default function App() {
     } else {
       document.documentElement.classList.remove("dark");
     }
-    localStorage.setItem("socrate_theme", theme);
   }, [theme]);
+
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -105,7 +108,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [showHistory, setShowHistory] = useState(false);
-  const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
 
   const [viewingDoc, setViewingDoc] = useState<Document | null>(null);
@@ -121,6 +124,50 @@ export default function App() {
 
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("fr-FR").format(value);
+
+  // ── Auth token injection ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    setTokenGetter(user ? getToken : null);
+  }, [user, getToken]);
+
+  // ── Load preferences + conversations when user logs in ──────────────────────
+
+  useEffect(() => {
+    if (!user) {
+      prefsLoadedRef.current = false;
+      setConversations([]);
+      setCurrentConvId(null);
+      setMessages([]);
+      return;
+    }
+
+    // Load preferences
+    fsLoadPreferences(user.uid).then((prefs) => {
+      if (prefs.theme) setTheme(prefs.theme);
+      if (prefs.model) setSelectedModel(prefs.model);
+      prefsLoadedRef.current = true;
+    }).catch(console.error);
+
+    // Load conversations
+    fsLoadConversations(user.uid).then((convs) => {
+      setConversations(convs as Conversation[]);
+    }).catch(console.error);
+  }, [user]);
+
+  // ── Persist preferences on change (after initial load) ─────────────────────
+
+  useEffect(() => {
+    if (!user || !prefsLoadedRef.current) return;
+    fsSavePreferences(user.uid, { theme }).catch(console.error);
+  }, [theme]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!user || !prefsLoadedRef.current || !selectedModel) return;
+    fsSavePreferences(user.uid, { model: selectedModel }).catch(console.error);
+  }, [selectedModel]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Scroll ──────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -142,24 +189,29 @@ export default function App() {
     }
   }, [docMessages]);
 
-  // Auto-save current conversation when messages change
+  // ── Auto-save conversation to Firestore ─────────────────────────────────────
+
   useEffect(() => {
-    if (messages.length === 0) return;
+    if (messages.length === 0 || !user) return;
     const firstUserMsg = messages.find((m) => m.role === "user");
     const title = firstUserMsg
       ? firstUserMsg.content.slice(0, 60) + (firstUserMsg.content.length > 60 ? "…" : "")
       : "Conversation";
 
+    const id = currentConvId ?? Date.now().toString();
+    if (!currentConvId) setCurrentConvId(id);
+
+    const conv: Conversation = { id, title, model: selectedModel, messages, updatedAt: Date.now() };
+
     setConversations((prev) => {
-      const id = currentConvId ?? Date.now().toString();
-      if (!currentConvId) setCurrentConvId(id);
-      const conv: Conversation = { id, title, model: selectedModel, messages, updatedAt: Date.now() };
       const exists = prev.some((c) => c.id === id);
-      const updated = exists ? prev.map((c) => (c.id === id ? conv : c)) : [conv, ...prev];
-      persistConversations(updated);
-      return updated;
+      return exists ? prev.map((c) => (c.id === id ? conv : c)) : [conv, ...prev];
     });
+
+    fsSaveConversation(user.uid, conv as FSConversation).catch(console.error);
   }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Documents ───────────────────────────────────────────────────────────────
 
   const loadDocuments = useCallback(async () => {
     try {
@@ -172,8 +224,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadDocuments();
-  }, [loadDocuments]);
+    if (user) loadDocuments();
+  }, [loadDocuments, user]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -194,8 +246,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadModels();
-  }, [loadModels]);
+    if (user) loadModels();
+  }, [loadModels, user]);
+
+  // ── Conversation actions ────────────────────────────────────────────────────
 
   const handleNewConversation = () => {
     abortControllerRef.current?.abort();
@@ -215,16 +269,15 @@ export default function App() {
   };
 
   const handleDeleteConversation = (id: string) => {
-    setConversations((prev) => {
-      const updated = prev.filter((c) => c.id !== id);
-      persistConversations(updated);
-      return updated;
-    });
+    setConversations((prev) => prev.filter((c) => c.id !== id));
     if (currentConvId === id) {
       setMessages([]);
       setCurrentConvId(null);
     }
+    if (user) fsDeleteConversation(user.uid, id).catch(console.error);
   };
+
+  // ── Document upload/indexing ────────────────────────────────────────────────
 
   const handleUpload = async (file: File) => {
     setUploading(true);
@@ -508,6 +561,22 @@ export default function App() {
     return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
   };
 
+  // ── Auth loading / gate ─────────────────────────────────────────────────────
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen w-full bg-[#FDFCFA] dark:bg-[#0D0D0C]">
+        <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
+  // ── Main UI ─────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex flex-col h-screen w-full bg-[#FDFCFA] text-[#1A1A1A] overflow-hidden">
       {/* Mobile Header */}
@@ -519,7 +588,7 @@ export default function App() {
         >
           <History size={18} />
         </button>
-        
+
         <span className="text-xs tracking-[0.25em] font-semibold text-[#1A1A1A] dark:text-[#ECEAE4] select-none">
           S0CR4T3
         </span>
@@ -532,7 +601,7 @@ export default function App() {
           >
             {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
-          
+
           <button
             onClick={() => setShowDocs((v) => !v)}
             className="p-2 text-[#8C8C8C] hover:text-black dark:text-[#A6A196] dark:hover:text-white transition-colors"
@@ -625,6 +694,18 @@ export default function App() {
             <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
             <div className="w-1.5 h-1.5 rounded-full bg-black"></div>
             <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
+
+            {/* Logout */}
+            <button
+              onClick={logOut}
+              title={`Déconnexion (${user.email})`}
+              className="flex flex-col items-center gap-1 group"
+            >
+              <LogOut
+                size={18}
+                className="text-[#CBC7C0] group-hover:text-red-400 transition-colors"
+              />
+            </button>
           </div>
         </nav>
 
@@ -703,6 +784,18 @@ export default function App() {
                       </div>
                     ))
                 )}
+              </div>
+
+              {/* User info + logout (mobile) */}
+              <div className="px-6 py-4 border-t border-[#E5E2DD] flex items-center justify-between">
+                <span className="text-[10px] text-[#8C8C8C] truncate max-w-[160px]">{user.email}</span>
+                <button
+                  onClick={logOut}
+                  className="text-[#CBC7C0] hover:text-red-400 transition-colors"
+                  title="Déconnexion"
+                >
+                  <LogOut size={13} />
+                </button>
               </div>
             </motion.aside>
           )}

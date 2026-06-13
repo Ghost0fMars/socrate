@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import pathlib
 import threading
@@ -11,7 +12,7 @@ import ollama
 import pypdf
 from docx import Document as DocxDocument
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
@@ -36,6 +37,7 @@ CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
 
 _openai_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 _openai_sync_client: OpenAI | None = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -58,14 +60,66 @@ NON_CHAT_MODEL_MARKERS = (
     "snowflake-arctic-embed",
 )
 
-# Initialize Qdrant Client in local persistent storage mode
+# ── Firebase Admin ────────────────────────────────────────────────────────────
+
+_firebase_initialized = False
+_firebase_auth = None
+
+def _init_firebase():
+    global _firebase_initialized, _firebase_auth
+    if not FIREBASE_PROJECT_ID:
+        return
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_creds
+        from firebase_admin import auth as fb_auth
+        if not firebase_admin._apps:
+            sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+            sa_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
+            if sa_json:
+                cred = fb_creds.Certificate(json.loads(sa_json))
+                firebase_admin.initialize_app(cred)
+            elif sa_path:
+                cred = fb_creds.Certificate(sa_path)
+                firebase_admin.initialize_app(cred)
+            else:
+                # Token verification only — no service account needed.
+                firebase_admin.initialize_app(options={"projectId": FIREBASE_PROJECT_ID})
+        _firebase_auth = fb_auth
+        _firebase_initialized = True
+        print(f"Firebase Admin initialized (project: {FIREBASE_PROJECT_ID})", flush=True)
+    except Exception as e:
+        print(f"Firebase Admin init error: {e}", flush=True)
+
+_init_firebase()
+
+
+async def get_current_user_id(authorization: str = Header(None)) -> str:
+    """Extract Firebase UID from the Bearer token.
+
+    Returns 'anonymous' if Firebase is not configured (local mode).
+    Raises 401 if Firebase is configured but the token is missing/invalid.
+    """
+    if not _firebase_initialized:
+        return "anonymous"
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token d'authentification manquant.")
+    token = authorization.removeprefix("Bearer ")
+    try:
+        decoded = _firebase_auth.verify_id_token(token)
+        return decoded["uid"]
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Token invalide: {e}")
+
+
+# ── Qdrant ────────────────────────────────────────────────────────────────────
+
 _DB_PATH = pathlib.Path.home() / ".local" / "share" / "socrate" / "qdrant_db"
 _DB_PATH.mkdir(parents=True, exist_ok=True)
 qdrant_client = QdrantClient(path=str(_DB_PATH))
 _qdrant_lock = threading.Lock()
 
 def get_active_collection() -> tuple[str, int]:
-    """Return the active collection name and dimension size based on model config."""
     if OPENAI_API_KEY and _openai_sync_client:
         return "documents_openai", 1536
     return "documents", 768
@@ -86,7 +140,6 @@ def _ensure_collection(collection_name: str, size: int) -> None:
     except Exception as e:
         print(f"Error ensuring Qdrant collection {collection_name!r}: {e}", flush=True)
 
-# Pre-ensure default collections on startup
 try:
     _ensure_collection("documents", 768)
     if OPENAI_API_KEY:
@@ -94,25 +147,33 @@ try:
 except Exception as e:
     print(f"Startup Qdrant ensure failed: {e}", flush=True)
 
-# Cache: {doc_id: source_name} — rebuilt on first access, invalidated on write.
-_doc_sources_cache: dict[str, str] | None = None
+# Per-user doc source cache: {user_id: {doc_id: source_name}}
+_doc_sources_cache_by_user: dict[str, dict[str, str]] = {}
 
-# State of the background corpus indexation.
 _index_state: dict = {"running": False, "done": 0, "total": 0, "errors": 0, "result": None}
 
 
-def _get_doc_sources() -> dict[str, str]:
-    global _doc_sources_cache
-    if _doc_sources_cache is None:
+def _user_filter(user_id: str) -> models.Filter | None:
+    if not user_id or user_id == "anonymous":
+        return None
+    return models.Filter(
+        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))]
+    )
+
+
+def _get_doc_sources(user_id: str) -> dict[str, str]:
+    if user_id not in _doc_sources_cache_by_user:
         seen: dict[str, str] = {}
         offset = None
         collection_name, collection_size = get_active_collection()
         _ensure_collection(collection_name, collection_size)
+        scroll_filter = _user_filter(user_id)
         while True:
             try:
                 with _qdrant_lock:
                     records, offset = qdrant_client.scroll(
                         collection_name=collection_name,
+                        scroll_filter=scroll_filter,
                         limit=1000,
                         offset=offset,
                         with_payload=True,
@@ -127,13 +188,12 @@ def _get_doc_sources() -> dict[str, str]:
                 break
             if offset is None:
                 break
-        _doc_sources_cache = seen
-    return _doc_sources_cache
+        _doc_sources_cache_by_user[user_id] = seen
+    return _doc_sources_cache_by_user[user_id]
 
 
-def _invalidate_cache() -> None:
-    global _doc_sources_cache
-    _doc_sources_cache = None
+def _invalidate_cache(user_id: str) -> None:
+    _doc_sources_cache_by_user.pop(user_id, None)
 
 
 class ChatMessage(BaseModel):
@@ -189,21 +249,17 @@ def get_corpus_category(path: pathlib.Path) -> str:
     return relative.parts[0] if len(relative.parts) > 1 else ""
 
 
-def delete_existing_path(path: pathlib.Path) -> None:
+def delete_existing_path(path: pathlib.Path, user_id: str) -> None:
     collection_name, _ = get_active_collection()
+    must = [models.FieldCondition(key="path", match=models.MatchValue(value=str(path)))]
+    if user_id and user_id != "anonymous":
+        must.append(models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id)))
     try:
         with _qdrant_lock:
             qdrant_client.delete(
                 collection_name=collection_name,
                 points_selector=models.FilterSelector(
-                    filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="path",
-                                match=models.MatchValue(value=str(path))
-                            )
-                        ]
-                    )
+                    filter=models.Filter(must=must)
                 )
             )
     except Exception:
@@ -213,7 +269,6 @@ def delete_existing_path(path: pathlib.Path) -> None:
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    # Try OpenAI if configured
     if OPENAI_API_KEY and _openai_sync_client:
         try:
             response = _openai_sync_client.embeddings.create(
@@ -224,7 +279,6 @@ def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
         except Exception as e:
             print(f"OpenAI embedding error: {e}, falling back to Ollama", flush=True)
 
-    # Fallback to Ollama
     try:
         response = ollama.embed(model=EMBED_MODEL, input=texts)
         return response.embeddings
@@ -233,8 +287,7 @@ def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
         raise
 
 def get_embedding(text: str) -> list[float]:
-    embeddings = get_embeddings_batch([text])
-    return embeddings[0]
+    return get_embeddings_batch([text])[0]
 
 def index_text(
     *,
@@ -242,6 +295,7 @@ def index_text(
     text: str,
     path: pathlib.Path | None = None,
     category: str = "",
+    user_id: str = "anonymous",
 ) -> dict:
     if not text.strip():
         raise HTTPException(status_code=400, detail="Document vide ou illisible.")
@@ -256,9 +310,8 @@ def index_text(
     _ensure_collection(collection_name, collection_size)
 
     if path:
-        delete_existing_path(path)
+        delete_existing_path(path, user_id)
 
-    # Batch embeddings creation in groups of 32 chunks to avoid limits
     batch_size = 32
     embeddings = []
     for offset in range(0, len(chunks), batch_size):
@@ -278,6 +331,7 @@ def index_text(
             "path": source_path,
             "category": category,
             "document_content": chunk,
+            "user_id": user_id,
         }
         if i == 0:
             payload["full_content"] = text
@@ -295,7 +349,7 @@ def index_text(
             points=points,
             wait=True
         )
-    _invalidate_cache()
+    _invalidate_cache(user_id)
 
     return {
         "id": doc_id,
@@ -323,13 +377,12 @@ def _query_words(text: str) -> set[str]:
     } - _STOP_FR
 
 
-def _find_boosted_doc_ids(query: str) -> dict[str, str]:
-    """Return {doc_id: source_name} for documents whose filename contains a query word."""
+def _find_boosted_doc_ids(query: str, user_id: str) -> dict[str, str]:
     qwords = _query_words(query)
     if not qwords:
         return {}
     boosted: dict[str, str] = {}
-    for doc_id, source in _get_doc_sources().items():
+    for doc_id, source in _get_doc_sources(user_id).items():
         source_words = {
             w.lower()
             for w in source.replace("-", " ").replace(".", " ").replace("'", " ").split()
@@ -348,7 +401,12 @@ def _format_chunk(doc: str, meta: dict) -> str:
     return f"[source: {label} | extrait: {chunk}]\n{doc}"
 
 
-def retrieve_context(query: str, n_results: int = 4, doc_id: str | None = None) -> str:
+def retrieve_context(
+    query: str,
+    n_results: int = 4,
+    doc_id: str | None = None,
+    user_id: str = "anonymous",
+) -> str:
     collection_name, collection_size = get_active_collection()
     _ensure_collection(collection_name, collection_size)
     try:
@@ -365,16 +423,17 @@ def retrieve_context(query: str, n_results: int = 4, doc_id: str | None = None) 
         print(f"Error getting query embedding in retrieve_context: {exc}", flush=True)
         return ""
 
-    query_filter = None
-    if doc_id:
-        query_filter = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="doc_id",
-                    match=models.MatchValue(value=doc_id)
-                )
-            ]
+    # Build filter conditions
+    must_conditions = []
+    if user_id and user_id != "anonymous":
+        must_conditions.append(
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))
         )
+    if doc_id:
+        must_conditions.append(
+            models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))
+        )
+    query_filter = models.Filter(must=must_conditions) if must_conditions else None
 
     try:
         with _qdrant_lock:
@@ -397,7 +456,7 @@ def retrieve_context(query: str, n_results: int = 4, doc_id: str | None = None) 
         for hit in hits:
             meta = hit.payload or {}
             doc = meta.get("document_content", "")
-            dist = 1.0 - hit.score  # Cosine distance
+            dist = 1.0 - hit.score
             key = f"{meta.get('doc_id')}_{meta.get('chunk')}"
             if key in seen or dist > max_dist:
                 continue
@@ -407,27 +466,26 @@ def retrieve_context(query: str, n_results: int = 4, doc_id: str | None = None) 
     collect(results)
 
     if not doc_id:
-        # Keyword boost: when the query names a specific source, prepend its best chunks.
         try:
-            boosted = _find_boosted_doc_ids(query)
+            boosted = _find_boosted_doc_ids(query, user_id)
             for doc_id_boost in boosted:
+                boost_must = []
+                if user_id and user_id != "anonymous":
+                    boost_must.append(
+                        models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))
+                    )
+                boost_must.append(
+                    models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id_boost))
+                )
                 with _qdrant_lock:
                     r = qdrant_client.query_points(
                         collection_name=collection_name,
                         query=query_embedding,
                         limit=3,
-                        query_filter=models.Filter(
-                            must=[
-                                models.FieldCondition(
-                                    key="doc_id",
-                                    match=models.MatchValue(value=doc_id_boost)
-                                )
-                            ]
-                        ),
+                        query_filter=models.Filter(must=boost_must),
                         with_payload=True,
                         with_vectors=False,
                     ).points
-                # Insert boosted chunks at the front, skipping distance filter
                 boosted_parts = []
                 for hit in r:
                     meta = hit.payload or {}
@@ -437,15 +495,13 @@ def retrieve_context(query: str, n_results: int = 4, doc_id: str | None = None) 
                         continue
                     seen.add(key)
                     boosted_parts.append(_format_chunk(doc, meta))
-                parts[:0] = boosted_parts  # prepend
+                parts[:0] = boosted_parts
         except Exception as exc:
             print(f"Error in keyword boost retrieve_context: {exc}", flush=True)
 
     return "\n\n---\n\n".join(parts)
 
 
-
-# Keywords identifying the user's own writing — used for style reference.
 _STYLE_KEYWORDS = ("journal", "désir", "kubrick", "eyes wide", "mist", "darabont")
 
 
@@ -454,8 +510,7 @@ def _is_style_source(source: str) -> bool:
     return any(kw in s for kw in _STYLE_KEYWORDS)
 
 
-def retrieve_style_context(query: str, n_results: int = 3) -> str:
-    """Return semantically close excerpts from the user's own writing for style calibration."""
+def retrieve_style_context(query: str, n_results: int = 3, user_id: str = "anonymous") -> str:
     collection_name, collection_size = get_active_collection()
     _ensure_collection(collection_name, collection_size)
     try:
@@ -469,7 +524,7 @@ def retrieve_style_context(query: str, n_results: int = 3) -> str:
     try:
         style_doc_ids = {
             doc_id
-            for doc_id, source in _get_doc_sources().items()
+            for doc_id, source in _get_doc_sources(user_id).items()
             if _is_style_source(source)
         }
     except Exception as exc:
@@ -485,20 +540,22 @@ def retrieve_style_context(query: str, n_results: int = 3) -> str:
         print(f"Error getting query embedding in retrieve_style_context: {exc}", flush=True)
         return ""
 
+    must_conditions = []
+    if user_id and user_id != "anonymous":
+        must_conditions.append(
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))
+        )
+    must_conditions.append(
+        models.FieldCondition(key="doc_id", match=models.MatchAny(any=list(style_doc_ids)))
+    )
+
     try:
         with _qdrant_lock:
             results = qdrant_client.query_points(
                 collection_name=collection_name,
                 query=query_embedding,
                 limit=n_results,
-                query_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_id",
-                            match=models.MatchAny(any=list(style_doc_ids))
-                        )
-                    ]
-                ),
+                query_filter=models.Filter(must=must_conditions),
                 with_payload=True,
                 with_vectors=False,
             ).points
@@ -527,17 +584,18 @@ def is_chat_model(name: str) -> bool:
 
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
+
     if request.use_corpus:
         context, style_context = await asyncio.gather(
-            asyncio.to_thread(retrieve_context, request.message, doc_id=request.doc_id),
-            asyncio.to_thread(retrieve_style_context, request.message),
+            asyncio.to_thread(retrieve_context, request.message, 4, request.doc_id, user_id),
+            asyncio.to_thread(retrieve_style_context, request.message, 3, user_id),
         )
     else:
         context, style_context = "", ""
     model = request.model or CHAT_MODEL
-    
-    # Calculate Pedagogical Dramatic Tension S(t)
+
     history_list = [{"role": msg.role, "content": msg.content} for msg in request.history]
     tension_metrics = calculate_dramatic_tension(history_list, request.message, context)
     is_maieutic = tension_metrics["maieutic_posture"]
@@ -675,14 +733,15 @@ async def list_models():
 
 
 @app.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
     content = await file.read()
     filename = file.filename or "document"
     text = extract_text(filename, content)
-    return index_text(filename=filename, text=text)
+    return index_text(filename=filename, text=text, user_id=user_id)
 
 
-async def _run_index_corpus() -> None:
+async def _run_index_corpus(user_id: str) -> None:
     global _index_state
     _index_state = {"running": True, "done": 0, "total": 0, "errors": 0, "result": None}
 
@@ -701,7 +760,6 @@ async def _run_index_corpus() -> None:
     collection_name, collection_size = get_active_collection()
     _ensure_collection(collection_name, collection_size)
 
-    # Skip paths already indexed and unmodified since last indexation.
     try:
         count = qdrant_client.get_collection(collection_name=collection_name).points_count
     except Exception:
@@ -709,11 +767,13 @@ async def _run_index_corpus() -> None:
 
     if count > 0:
         path_to_indexed_at: dict[str, str] = {}
+        scroll_filter = _user_filter(user_id)
         offset = None
         while True:
             try:
                 records, offset = qdrant_client.scroll(
                     collection_name=collection_name,
+                    scroll_filter=scroll_filter,
                     limit=1000,
                     offset=offset,
                     with_payload=True,
@@ -753,13 +813,13 @@ async def _run_index_corpus() -> None:
         try:
             content = path.read_bytes()
             text = extract_text(path.name, content)
-            # Run blocking work in thread so the event loop stays responsive.
             result = await asyncio.to_thread(
                 index_text,
                 filename=path.name,
                 text=text,
                 path=path,
                 category=get_corpus_category(path),
+                user_id=user_id,
             )
             indexed.append({"name": result["name"], "chunks": result["chunks"]})
         except Exception as exc:
@@ -777,14 +837,15 @@ async def _run_index_corpus() -> None:
 
 
 @app.post("/documents/index-corpus")
-async def index_corpus(background_tasks: BackgroundTasks):
+async def index_corpus(background_tasks: BackgroundTasks, authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
     if _index_state.get("running"):
         raise HTTPException(status_code=409, detail="Indexation déjà en cours.")
     if not CORPUS_PATH.exists():
         raise HTTPException(
             status_code=404, detail=f"Dossier corpus introuvable: {CORPUS_PATH}"
         )
-    background_tasks.add_task(_run_index_corpus)
+    background_tasks.add_task(_run_index_corpus, user_id)
     return {"status": "started"}
 
 
@@ -794,7 +855,8 @@ async def index_corpus_status():
 
 
 @app.get("/documents")
-async def list_documents():
+async def list_documents(authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
     collection_name, collection_size = get_active_collection()
     _ensure_collection(collection_name, collection_size)
     try:
@@ -805,11 +867,13 @@ async def list_documents():
         return []
 
     seen: dict[str, dict] = {}
+    scroll_filter = _user_filter(user_id)
     offset = None
     while True:
         try:
             records, offset = qdrant_client.scroll(
                 collection_name=collection_name,
+                scroll_filter=scroll_filter,
                 limit=1000,
                 offset=offset,
                 with_payload=True,
@@ -836,8 +900,8 @@ async def list_documents():
 
 
 @app.get("/documents/stats")
-async def document_stats():
-    docs = await list_documents()
+async def document_stats(authorization: str = Header(None)):
+    docs = await list_documents(authorization)
     return {
         "documents": len(docs),
         "chunks": sum(int(doc.get("chunks") or 0) for doc in docs),
@@ -846,8 +910,18 @@ async def document_stats():
 
 
 @app.get("/documents/{doc_id}/content")
-async def get_document_content(doc_id: str):
+async def get_document_content(doc_id: str, authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
     collection_name, _ = get_active_collection()
+
+    must_conditions = [
+        models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))
+    ]
+    if user_id and user_id != "anonymous":
+        must_conditions.append(
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))
+        )
+
     all_records = []
     offset = None
     while True:
@@ -855,14 +929,7 @@ async def get_document_content(doc_id: str):
             with _qdrant_lock:
                 records, offset = qdrant_client.scroll(
                     collection_name=collection_name,
-                    scroll_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="doc_id",
-                                match=models.MatchValue(value=doc_id),
-                            )
-                        ]
-                    ),
+                    scroll_filter=models.Filter(must=must_conditions),
                     limit=1000,
                     offset=offset,
                     with_payload=True,
@@ -893,9 +960,9 @@ async def get_document_content(doc_id: str):
     full_content = meta0.get("full_content")
     if full_content:
         return {
-            "name": source, 
-            "content": full_content, 
-            "word_count": word_count, 
+            "name": source,
+            "content": full_content,
+            "word_count": word_count,
             "chunks": len(all_records),
             "chunks_list": chunks_list
         }
@@ -906,16 +973,15 @@ async def get_document_content(doc_id: str):
             try:
                 text = extract_text(p.name, p.read_bytes())
                 return {
-                    "name": source, 
-                    "content": text, 
-                    "word_count": word_count, 
+                    "name": source,
+                    "content": text,
+                    "word_count": word_count,
                     "chunks": len(all_records),
                     "chunks_list": chunks_list
                 }
             except Exception:
                 pass
 
-    # Reconstruct from overlapping chunks (chunk_size=360, overlap=60 → step=300)
     step = 300
     parts: list[str] = []
     for i, record in enumerate(all_records):
@@ -923,28 +989,31 @@ async def get_document_content(doc_id: str):
         parts.extend(words[:step] if i < len(all_records) - 1 else words)
 
     return {
-        "name": source, 
-        "content": " ".join(parts), 
-        "word_count": word_count, 
+        "name": source,
+        "content": " ".join(parts),
+        "word_count": word_count,
         "chunks": len(all_records),
         "chunks_list": chunks_list
     }
 
 
 @app.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
     collection_name, _ = get_active_collection()
+
+    must_conditions = [
+        models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))
+    ]
+    if user_id and user_id != "anonymous":
+        must_conditions.append(
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))
+        )
+
     try:
         records, _ = qdrant_client.scroll(
             collection_name=collection_name,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="doc_id",
-                        match=models.MatchValue(value=doc_id)
-                    )
-                ]
-            ),
+            scroll_filter=models.Filter(must=must_conditions),
             limit=1,
             with_payload=False,
             with_vectors=False,
@@ -955,14 +1024,7 @@ async def delete_document(doc_id: str):
         qdrant_client.delete(
             collection_name=collection_name,
             points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_id",
-                            match=models.MatchValue(value=doc_id)
-                        )
-                    ]
-                )
+                filter=models.Filter(must=must_conditions)
             )
         )
     except HTTPException:
@@ -970,5 +1032,5 @@ async def delete_document(doc_id: str):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    _invalidate_cache()
+    _invalidate_cache(user_id)
     return {"deleted": doc_id}

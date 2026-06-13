@@ -82,3 +82,25 @@ npm run dist            # Pour compiler et générer l'installateur dans release
 ```
 
 Les installateurs et packages binaires finaux seront générés dans le dossier `release/`.
+
+---
+
+## 📜 Licence & Propriété
+
+Socrate est un **logiciel libre** publié sous licence **GNU Affero General Public License v3.0 (AGPL-3.0-or-later)**. Le texte intégral de la licence est disponible dans le fichier [LICENSE](./LICENSE).
+
+**Copyright © 2026 — Association àlaclé**
+Association française régie par la loi du 1er juillet 1901.
+RNA : **W131016315**
+Contact : **contact@alacle.org**
+
+L'ensemble du code source de Socrate, ainsi que la conception de l'**Intégrale Dramatique $S(t)$**, sont la propriété de l'association àlaclé.
+
+### Ce que l'AGPL v3 implique
+
+* ✅ Vous êtes libre d'**utiliser, étudier, modifier et redistribuer** Socrate, y compris à des fins commerciales.
+* ⚖️ Toute redistribution ou version modifiée doit rester sous licence **AGPL v3** et **conserver les mentions de copyright** ci-dessus.
+* 🌐 **Clause réseau (le cœur de l'AGPL) :** si vous mettez Socrate — ou une version modifiée — à disposition d'utilisateurs via un réseau (par exemple un service web ou une instance hébergée), vous êtes tenu de **rendre disponible le code source correspondant** à ces utilisateurs.
+* 🛡️ Le logiciel est fourni **sans aucune garantie**, dans la mesure permise par la loi.
+
+> Pour toute demande relative à une utilisation sous d'autres conditions (licence commerciale, partenariat, etc.), contactez l'association à l'adresse ci-dessus.

@@ -1,0 +1,53 @@
+================================================================================
+ SOCRATE — Mentions de copyright et de licence
+================================================================================
+
+1) En-tête à placer en haut de CHAQUE fichier source (.ts, .py, etc.)
+--------------------------------------------------------------------------------
+Adapte le commentaire au langage (// pour TS/JS, # pour Python) :
+
+    Socrate — Interface de pensée locale et souveraine avec IA
+    Copyright (C) 2026  Association àlaclé (association loi 1901, RNA W131016315)
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Affero General Public License as published
+    by the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Affero General Public License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+2) Section à ajouter à la fin du README.md
+--------------------------------------------------------------------------------
+
+## 📜 Licence
+
+Socrate est un logiciel libre publié sous licence **GNU Affero General Public
+License v3.0 (AGPL-3.0-or-later)**. Voir le fichier [LICENSE](./LICENSE).
+
+Copyright (C) 2026 **Association àlaclé** — association française régie par la
+loi du 1er juillet 1901, RNA **W131016315**.
+
+L'AGPL impose notamment que toute personne mettant Socrate (ou une version
+modifiée) à disposition via un réseau — par exemple un service web — rende
+disponible le code source correspondant aux utilisateurs de ce service.
+
+
+3) Identifiant SPDX (optionnel, en une ligne en tête de fichier)
+--------------------------------------------------------------------------------
+
+    // SPDX-License-Identifier: AGPL-3.0-or-later
+    // SPDX-FileCopyrightText: 2026 Association àlaclé
+
+================================================================================
+Note : le fichier LICENSE contient le texte intégral et VERBATIM de l'AGPL v3.
+Ce texte ne doit pas être modifié ; seules les mentions de copyright ci-dessus
+(nom du programme, année, titulaire des droits) t'appartiennent et se placent
+DANS tes fichiers / ton README, pas dans le corps de la licence.
+================================================================================

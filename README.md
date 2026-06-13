@@ -95,6 +95,7 @@ RNA : **W131016315**
 Contact : **contact@alacle.org**
 
 Publié sous licence AGPL v3. Droits patrimoniaux détenus par l'association àlaclé. Modèle de l'Intégrale Dramatique S(t) conçu par Étienne Lavallard, documenté publiquement depuis le 13 juin 2026.
+https://alacle.org/integrale_dramatique
 
 ### Ce que l'AGPL v3 implique
 

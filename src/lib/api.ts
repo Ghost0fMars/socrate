@@ -1,3 +1,5 @@
+import { auth } from './firebase';
+
 // Electron packaged apps load from file://, so absolute /api paths don't resolve.
 // On Vercel (https://) or dev (http://), /api routes to the serverless function or proxy.
 const API =
@@ -5,16 +7,10 @@ const API =
     ? (import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
     : '/api';
 
-// Injected by App.tsx once the user is authenticated.
-let _tokenGetter: (() => Promise<string | null>) | null = null;
-
-export function setTokenGetter(getter: (() => Promise<string | null>) | null) {
-  _tokenGetter = getter;
-}
-
 async function authHeaders(): Promise<HeadersInit> {
-  if (!_tokenGetter) return {};
-  const token = await _tokenGetter();
+  const user = auth.currentUser;
+  if (!user) return {};
+  const token = await user.getIdToken();
   if (!token) return {};
   return { Authorization: `Bearer ${token}` };
 }

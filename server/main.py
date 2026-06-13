@@ -37,7 +37,6 @@ CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
 
 _openai_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 _openai_sync_client: OpenAI | None = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -60,56 +59,9 @@ NON_CHAT_MODEL_MARKERS = (
     "snowflake-arctic-embed",
 )
 
-# ── Firebase Admin ────────────────────────────────────────────────────────────
-
-_firebase_initialized = False
-_firebase_auth = None
-
-def _init_firebase():
-    global _firebase_initialized, _firebase_auth
-    if not FIREBASE_PROJECT_ID:
-        return
-    try:
-        import firebase_admin
-        from firebase_admin import credentials as fb_creds
-        from firebase_admin import auth as fb_auth
-        if not firebase_admin._apps:
-            sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
-            sa_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
-            if sa_json:
-                cred = fb_creds.Certificate(json.loads(sa_json))
-                firebase_admin.initialize_app(cred)
-            elif sa_path:
-                cred = fb_creds.Certificate(sa_path)
-                firebase_admin.initialize_app(cred)
-            else:
-                # Token verification only — no service account needed.
-                firebase_admin.initialize_app(options={"projectId": FIREBASE_PROJECT_ID})
-        _firebase_auth = fb_auth
-        _firebase_initialized = True
-        print(f"Firebase Admin initialized (project: {FIREBASE_PROJECT_ID})", flush=True)
-    except Exception as e:
-        print(f"Firebase Admin init error: {e}", flush=True)
-
-_init_firebase()
-
-
 async def get_current_user_id(authorization: str = Header(None)) -> str:
-    """Extract Firebase UID from the Bearer token.
-
-    Returns 'anonymous' if Firebase is not configured (local mode).
-    Raises 401 if Firebase is configured but the token is missing/invalid.
-    """
-    if not _firebase_initialized:
-        return "anonymous"
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token d'authentification manquant.")
-    token = authorization.removeprefix("Bearer ")
-    try:
-        decoded = _firebase_auth.verify_id_token(token)
-        return decoded["uid"]
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Token invalide: {e}")
+    # Local backend — no authentication required. All users are "local".
+    return "local"
 
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────

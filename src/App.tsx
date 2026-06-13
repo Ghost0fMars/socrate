@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, LogOut } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, LogOut, LogIn } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -17,7 +17,6 @@ import {
   getIndexStatus,
   listModels,
   getDocumentContent,
-  setTokenGetter,
   type Document,
   type CorpusStats,
   type ModelInfo,
@@ -65,7 +64,14 @@ const MODEL_LABELS: Record<string, string> = {
 const getModelLabel = (name: string) => MODEL_LABELS[name] ?? name;
 
 export default function App() {
-  const { user, loading: authLoading, logOut, getToken } = useAuth();
+  const { user, loading: authLoading, logOut } = useAuth();
+
+  const [showAuth, setShowAuth] = useState(false);
+
+  // Dismiss auth screen as soon as the user is logged in
+  useEffect(() => {
+    if (user) setShowAuth(false);
+  }, [user]);
 
   const [theme, setTheme] = useState("light");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -124,12 +130,6 @@ export default function App() {
 
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("fr-FR").format(value);
-
-  // ── Auth token injection ────────────────────────────────────────────────────
-
-  useEffect(() => {
-    setTokenGetter(user ? getToken : null);
-  }, [user, getToken]);
 
   // ── Load preferences + conversations when user logs in ──────────────────────
 
@@ -224,8 +224,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user) loadDocuments();
-  }, [loadDocuments, user]);
+    if (user || !isOnline) loadDocuments();
+  }, [loadDocuments, user, isOnline]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -246,8 +246,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user) loadModels();
-  }, [loadModels, user]);
+    if (user || !isOnline) loadModels();
+  }, [loadModels, user, isOnline]);
 
   // ── Conversation actions ────────────────────────────────────────────────────
 
@@ -470,9 +470,10 @@ export default function App() {
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
+      const msg = error instanceof Error ? error.message : String(error);
       setDocMessages((prev) => [
         ...prev,
-        { id: "doc-error", role: "model", content: "Une erreur est survenue." },
+        { id: "doc-error", role: "model", content: `Une erreur est survenue : ${msg}` },
       ]);
     } finally {
       if (docAbortControllerRef.current === abortController) {
@@ -533,16 +534,14 @@ export default function App() {
       if (error instanceof DOMException && error.name === "AbortError") {
         return;
       }
-      console.error("Chat error:", error);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("Chat error:", msg);
       setMessages((prev) => [
         ...prev,
         {
           id: "error",
           role: "model",
-          content:
-            window.location.protocol === 'file:'
-              ? "Une erreur est survenue. Vérifiez que le serveur local est démarré."
-              : "Une erreur est survenue. L'API est momentanément indisponible.",
+          content: `Une erreur est survenue : ${msg}`,
         },
       ]);
     } finally {
@@ -562,8 +561,10 @@ export default function App() {
   };
 
   // ── Auth loading / gate ─────────────────────────────────────────────────────
+  // In local mode (localhost / Electron) the app opens without login.
+  // In online mode (deployed) Firebase auth is required.
 
-  if (authLoading) {
+  if (authLoading && isOnline) {
     return (
       <div className="flex items-center justify-center h-screen w-full bg-[#FDFCFA] dark:bg-[#0D0D0C]">
         <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
@@ -571,7 +572,7 @@ export default function App() {
     );
   }
 
-  if (!user) {
+  if ((!user && isOnline) || showAuth) {
     return <AuthScreen />;
   }
 
@@ -691,21 +692,30 @@ export default function App() {
               )}
             </button>
 
-            <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
-            <div className="w-1.5 h-1.5 rounded-full bg-black"></div>
-            <div className="w-1.5 h-1.5 rounded-full bg-[#E5E2DD]"></div>
-
-            {/* Logout */}
-            <button
-              onClick={logOut}
-              title={`Déconnexion (${user.email})`}
-              className="flex flex-col items-center gap-1 group"
-            >
-              <LogOut
-                size={18}
-                className="text-[#CBC7C0] group-hover:text-red-400 transition-colors"
-              />
-            </button>
+            {/* Login / Logout */}
+            {user ? (
+              <button
+                onClick={logOut}
+                title={`Déconnexion (${user.email})`}
+                className="flex flex-col items-center gap-1 group"
+              >
+                <LogOut
+                  size={18}
+                  className="text-[#CBC7C0] group-hover:text-red-400 transition-colors"
+                />
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowAuth(true)}
+                title="Se connecter pour synchroniser"
+                className="flex flex-col items-center gap-1 group"
+              >
+                <LogIn
+                  size={18}
+                  className="text-[#CBC7C0] group-hover:text-[#8C8C8C] transition-colors"
+                />
+              </button>
+            )}
           </div>
         </nav>
 
@@ -788,14 +798,26 @@ export default function App() {
 
               {/* User info + logout (mobile) */}
               <div className="px-6 py-4 border-t border-[#E5E2DD] flex items-center justify-between">
-                <span className="text-[10px] text-[#8C8C8C] truncate max-w-[160px]">{user.email}</span>
-                <button
-                  onClick={logOut}
-                  className="text-[#CBC7C0] hover:text-red-400 transition-colors"
-                  title="Déconnexion"
-                >
-                  <LogOut size={13} />
-                </button>
+                <span className="text-[10px] text-[#8C8C8C] truncate max-w-[160px]">
+                  {user?.email ?? 'Mode local'}
+                </span>
+                {user ? (
+                  <button
+                    onClick={logOut}
+                    className="text-[#CBC7C0] hover:text-red-400 transition-colors"
+                    title="Déconnexion"
+                  >
+                    <LogOut size={13} />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowAuth(true)}
+                    className="text-[#CBC7C0] hover:text-[#8C8C8C] transition-colors"
+                    title="Se connecter"
+                  >
+                    <LogIn size={13} />
+                  </button>
+                )}
               </div>
             </motion.aside>
           )}
@@ -906,7 +928,7 @@ export default function App() {
                   onChange={(e) => setSelectedModel(e.target.value)}
                   disabled={models.length === 0 || isLoading}
                   title="Modele Ollama"
-                  className="h-8 max-w-40 shrink-0 border border-[#E5E2DD] bg-transparent px-2 text-[10px] tracking-widest uppercase text-[#8C8C8C] outline-none transition-colors hover:border-[#CBC7C0] disabled:opacity-30 animate-none bg-[#FDFCFA] dark:bg-[#0D0D0C]"
+                  className="h-8 max-w-40 shrink-0 border border-[#E5E2DD] px-2 text-[10px] tracking-widest uppercase text-[#8C8C8C] outline-none transition-colors hover:border-[#CBC7C0] disabled:opacity-30 appearance-none bg-white dark:bg-black"
                 >
                   {models.length === 0 ? (
                     <option value="">Aucun modele</option>

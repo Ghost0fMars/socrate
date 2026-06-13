@@ -94,7 +94,8 @@ Association française régie par la loi du 1er juillet 1901.
 RNA : **W131016315**
 Contact : **contact@alacle.org**
 
-L'ensemble du code source de Socrate, ainsi que la conception de l'**Intégrale Dramatique $S(t)$**, sont la propriété de l'association àlaclé.
+Publié sous licence AGPL v3. Droits patrimoniaux détenus par l'association àlaclé. Modèle de l'Intégrale Dramatique S(t)S(t)
+S(t) conçu par Étienne Lavallard, documenté publiquement depuis le 13 juin 2026.
 
 ### Ce que l'AGPL v3 implique
 

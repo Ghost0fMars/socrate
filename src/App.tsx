@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, LogOut, LogIn, Pencil, FilePlus } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, Pencil, FilePlus } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -23,7 +23,6 @@ import {
   type CorpusStats,
   type ModelInfo,
 } from "./lib/api";
-import { useAuth } from "./lib/auth";
 import {
   fsLoadConversations,
   fsSaveConversation,
@@ -31,8 +30,7 @@ import {
   fsLoadPreferences,
   fsSavePreferences,
   type FSConversation,
-} from "./lib/firestore";
-import AuthScreen from "./components/AuthScreen";
+} from "./lib/store";
 
 interface Message {
   id: string;
@@ -49,32 +47,13 @@ interface Conversation {
 }
 
 const MODEL_LABELS: Record<string, string> = {
-  // Modèles locaux (Ollama)
   "qwen3:14b": "Reflexion",
   "gemma3:12b": "Fiction",
-  // Modèles OpenAI en ligne
-  "o4-mini": "OpenAI o4-mini",
-  "o3-mini": "OpenAI o3-mini",
-  "o3": "OpenAI o3",
-  "gpt-4o": "GPT-4o",
-  "gpt-4o-mini": "GPT-4o mini",
-  "gpt-4.1": "GPT-4.1",
-  "gpt-4.1-mini": "GPT-4.1 mini",
-  "gpt-4.1-nano": "GPT-4.1 nano",
 };
 
 const getModelLabel = (name: string) => MODEL_LABELS[name] ?? name;
 
 export default function App() {
-  const { user, loading: authLoading, logOut } = useAuth();
-
-  const [showAuth, setShowAuth] = useState(false);
-
-  // Dismiss auth screen as soon as the user is logged in
-  useEffect(() => {
-    if (user) setShowAuth(false);
-  }, [user]);
-
   const [theme, setTheme] = useState("light");
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
@@ -97,8 +76,6 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const indexPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const isOnline = window.location.protocol !== "file:" && !window.location.hostname.includes("localhost");
 
   const [showDocs, setShowDocs] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -144,40 +121,30 @@ export default function App() {
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("fr-FR").format(value);
 
-  // ── Load preferences + conversations when user logs in ──────────────────────
+  // ── Load preferences + conversations on startup ──────────────────────────────
 
   useEffect(() => {
-    if (!user) {
-      prefsLoadedRef.current = false;
-      setConversations([]);
-      setCurrentConvId(null);
-      setMessages([]);
-      return;
-    }
-
-    // Load preferences
-    fsLoadPreferences(user.uid).then((prefs) => {
+    fsLoadPreferences().then((prefs) => {
       if (prefs.theme) setTheme(prefs.theme);
       if (prefs.model) setSelectedModel(prefs.model);
       prefsLoadedRef.current = true;
     }).catch(console.error);
 
-    // Load conversations
-    fsLoadConversations(user.uid).then((convs) => {
+    fsLoadConversations().then((convs) => {
       setConversations(convs as Conversation[]);
     }).catch(console.error);
-  }, [user]);
+  }, []);
 
   // ── Persist preferences on change (after initial load) ─────────────────────
 
   useEffect(() => {
-    if (!user || !prefsLoadedRef.current) return;
-    fsSavePreferences(user.uid, { theme }).catch(console.error);
+    if (!prefsLoadedRef.current) return;
+    fsSavePreferences({ theme }).catch(console.error);
   }, [theme]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!user || !prefsLoadedRef.current || !selectedModel) return;
-    fsSavePreferences(user.uid, { model: selectedModel }).catch(console.error);
+    if (!prefsLoadedRef.current || !selectedModel) return;
+    fsSavePreferences({ model: selectedModel }).catch(console.error);
   }, [selectedModel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Scroll ──────────────────────────────────────────────────────────────────
@@ -202,10 +169,10 @@ export default function App() {
     }
   }, [docMessages]);
 
-  // ── Auto-save conversation to Firestore ─────────────────────────────────────
+  // ── Auto-save conversation ───────────────────────────────────────────────────
 
   useEffect(() => {
-    if (messages.length === 0 || !user) return;
+    if (messages.length === 0) return;
     const firstUserMsg = messages.find((m) => m.role === "user");
     const title = firstUserMsg
       ? firstUserMsg.content.slice(0, 60) + (firstUserMsg.content.length > 60 ? "…" : "")
@@ -221,7 +188,7 @@ export default function App() {
       return exists ? prev.map((c) => (c.id === id ? conv : c)) : [conv, ...prev];
     });
 
-    fsSaveConversation(user.uid, conv as FSConversation).catch(console.error);
+    fsSaveConversation(conv as FSConversation).catch(console.error);
   }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Documents ───────────────────────────────────────────────────────────────
@@ -237,8 +204,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user || !isOnline) loadDocuments();
-  }, [loadDocuments, user, isOnline]);
+    loadDocuments();
+  }, [loadDocuments]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -259,8 +226,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user || !isOnline) loadModels();
-  }, [loadModels, user, isOnline]);
+    loadModels();
+  }, [loadModels]);
 
   // ── Conversation actions ────────────────────────────────────────────────────
 
@@ -287,7 +254,7 @@ export default function App() {
       setMessages([]);
       setCurrentConvId(null);
     }
-    if (user) fsDeleteConversation(user.uid, id).catch(console.error);
+    fsDeleteConversation(id).catch(console.error);
   };
 
   // ── Document upload/indexing ────────────────────────────────────────────────
@@ -625,22 +592,6 @@ export default function App() {
     return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
   };
 
-  // ── Auth loading / gate ─────────────────────────────────────────────────────
-  // In local mode (localhost / Electron) the app opens without login.
-  // In online mode (deployed) Firebase auth is required.
-
-  if (authLoading && isOnline) {
-    return (
-      <div className="flex items-center justify-center h-screen w-full bg-[#FDFCFA] dark:bg-[#0D0D0C]">
-        <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
-      </div>
-    );
-  }
-
-  if ((!user && isOnline) || showAuth) {
-    return <AuthScreen />;
-  }
-
   // ── Main UI ─────────────────────────────────────────────────────────────────
 
   return (
@@ -757,30 +708,6 @@ export default function App() {
               )}
             </button>
 
-            {/* Login / Logout */}
-            {user ? (
-              <button
-                onClick={logOut}
-                title={`Déconnexion (${user.email})`}
-                className="flex flex-col items-center gap-1 group"
-              >
-                <LogOut
-                  size={18}
-                  className="text-[#CBC7C0] group-hover:text-red-400 transition-colors"
-                />
-              </button>
-            ) : (
-              <button
-                onClick={() => setShowAuth(true)}
-                title="Se connecter pour synchroniser"
-                className="flex flex-col items-center gap-1 group"
-              >
-                <LogIn
-                  size={18}
-                  className="text-[#CBC7C0] group-hover:text-[#8C8C8C] transition-colors"
-                />
-              </button>
-            )}
           </div>
         </nav>
 
@@ -861,29 +788,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* User info + logout (mobile) */}
-              <div className="px-6 py-4 border-t border-[#E5E2DD] flex items-center justify-between">
-                <span className="text-[10px] text-[#8C8C8C] truncate max-w-[160px]">
-                  {user?.email ?? 'Mode local'}
-                </span>
-                {user ? (
-                  <button
-                    onClick={logOut}
-                    className="text-[#CBC7C0] hover:text-red-400 transition-colors"
-                    title="Déconnexion"
-                  >
-                    <LogOut size={13} />
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowAuth(true)}
-                    className="text-[#CBC7C0] hover:text-[#8C8C8C] transition-colors"
-                    title="Se connecter"
-                  >
-                    <LogIn size={13} />
-                  </button>
-                )}
-              </div>
             </motion.aside>
           )}
         </AnimatePresence>
@@ -1143,8 +1047,7 @@ export default function App() {
 
             {/* Upload zone */}
             <div className="px-6 py-5 border-b border-[#E5E2DD]">
-              {!isOnline && (
-                <button
+              <button
                   type="button"
                   onClick={handleIndexCorpus}
                   disabled={indexingCorpus || uploading}
@@ -1157,7 +1060,6 @@ export default function App() {
                   )}
                   {indexingCorpus ? "Indexation du dossier..." : "Indexer SocrateCorpus"}
                 </button>
-              )}
               <div
                 onDragOver={(e) => {
                   e.preventDefault();

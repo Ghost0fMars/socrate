@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import re
+import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -17,7 +18,6 @@ from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Uploa
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
-from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel, Field
 from metrics.dramatic_integral import calculate_dramatic_tension
 
@@ -36,13 +36,6 @@ app.add_middleware(
 
 CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-_openai_client: AsyncOpenAI | None = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-_openai_sync_client: OpenAI | None = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-_OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "text-davinci")
 CORPUS_PATH = pathlib.Path(
     os.getenv(
         "SOCRATE_CORPUS_PATH",
@@ -73,8 +66,6 @@ qdrant_client = QdrantClient(path=str(_DB_PATH))
 _qdrant_lock = threading.Lock()
 
 def get_active_collection() -> tuple[str, int]:
-    if OPENAI_API_KEY and _openai_sync_client:
-        return "documents_openai", 1536
     return "documents", 768
 
 def _ensure_collection(collection_name: str, size: int) -> None:
@@ -95,8 +86,6 @@ def _ensure_collection(collection_name: str, size: int) -> None:
 
 try:
     _ensure_collection("documents", 768)
-    if OPENAI_API_KEY:
-        _ensure_collection("documents_openai", 1536)
 except Exception as e:
     print(f"Startup Qdrant ensure failed: {e}", flush=True)
 
@@ -104,6 +93,41 @@ except Exception as e:
 _doc_sources_cache_by_user: dict[str, dict[str, str]] = {}
 
 _index_state: dict = {"running": False, "done": 0, "total": 0, "errors": 0, "result": None}
+
+
+# ── SQLite ────────────────────────────────────────────────────────────────────
+
+_SQLITE_PATH = pathlib.Path.home() / ".local" / "share" / "socrate" / "socrate.db"
+_SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_SQLITE_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    with _get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                messages TEXT NOT NULL DEFAULT '[]',
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.commit()
+
+
+_init_db()
 
 
 def _user_filter(user_id: str) -> models.Filter | None:
@@ -231,16 +255,6 @@ def delete_existing_path(path: pathlib.Path, user_id: str) -> None:
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    if OPENAI_API_KEY and _openai_sync_client:
-        try:
-            response = _openai_sync_client.embeddings.create(
-                model="text-embedding-3-small",
-                input=texts
-            )
-            return [d.embedding for d in response.data]
-        except Exception as e:
-            print(f"OpenAI embedding error: {e}, falling back to Ollama", flush=True)
-
     try:
         response = ollama.embed(model=EMBED_MODEL, input=texts)
         return response.embeddings
@@ -634,29 +648,15 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
         messages.append({"role": role, "content": msg.content})
     messages.append({"role": "user", "content": request.message})
 
-    def _is_openai_model(name: str) -> bool:
-        return name.lower().startswith(_OPENAI_PREFIXES)
-
     async def generate():
         try:
-            if _is_openai_model(model) and _openai_client:
-                async with await _openai_client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    stream=True,
-                ) as stream:
-                    async for chunk in stream:
-                        content = chunk.choices[0].delta.content
-                        if content:
-                            yield content
-            else:
-                print(f"[chat] calling ollama model={model!r}", flush=True)
-                async for chunk in await AsyncClient().chat(
-                    model=model, messages=messages, stream=True
-                ):
-                    content = chunk.message.content
-                    if content:
-                        yield content
+            print(f"[chat] calling ollama model={model!r}", flush=True)
+            async for chunk in await AsyncClient().chat(
+                model=model, messages=messages, stream=True
+            ):
+                content = chunk.message.content
+                if content:
+                    yield content
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -668,14 +668,6 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
 @app.get("/models")
 async def list_models():
     result_models = []
-
-    if _openai_client:
-        result_models.append({
-            "name": OPENAI_MODEL,
-            "size": 0,
-            "modified_at": "",
-        })
-
     try:
         response = ollama.list()
         ollama_models = response.get("models", [])
@@ -690,8 +682,7 @@ async def list_models():
     except Exception:
         pass
 
-    default = OPENAI_MODEL if _openai_client else CHAT_MODEL
-    return {"default": default, "models": result_models}
+    return {"default": CHAT_MODEL, "models": result_models}
 
 
 @app.post("/documents/upload")
@@ -1102,3 +1093,86 @@ async def create_document(body: CreateDocumentRequest, authorization: str = Head
         user_id=user_id,
     )
     return result
+
+
+# ── Conversations (SQLite) ────────────────────────────────────────────────────
+
+class ConversationRequest(BaseModel):
+    id: str
+    title: str
+    model: str
+    messages: list
+    updatedAt: int
+
+
+@app.get("/conversations")
+async def get_conversations():
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, model, messages, updated_at FROM conversations ORDER BY updated_at DESC"
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "model": row["model"],
+            "messages": json.loads(row["messages"]),
+            "updatedAt": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+@app.post("/conversations", status_code=201)
+async def save_conversation(body: ConversationRequest):
+    with _get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversations (id, title, model, messages, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                model = excluded.model,
+                messages = excluded.messages,
+                updated_at = excluded.updated_at
+            """,
+            (body.id, body.title, body.model, json.dumps(body.messages), body.updatedAt),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.delete("/conversations/{conv_id}")
+async def delete_conversation(conv_id: str):
+    with _get_db() as conn:
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+        conn.commit()
+    return {"deleted": conv_id}
+
+
+# ── Préférences (SQLite) ──────────────────────────────────────────────────────
+
+class PreferencesRequest(BaseModel):
+    theme: str | None = None
+    model: str | None = None
+
+
+@app.get("/preferences")
+async def get_preferences():
+    with _get_db() as conn:
+        rows = conn.execute("SELECT key, value FROM preferences").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+@app.post("/preferences")
+async def save_preferences(body: PreferencesRequest):
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    with _get_db() as conn:
+        for key, value in updates.items():
+            conn.execute(
+                "INSERT INTO preferences (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+        conn.commit()
+    return {"ok": True}

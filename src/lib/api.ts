@@ -1,19 +1,4 @@
-import { auth } from './firebase';
-
-// Electron packaged apps load from file://, so absolute /api paths don't resolve.
-// On Vercel (https://) or dev (http://), /api routes to the serverless function or proxy.
-const API =
-  window.location.protocol === 'file:'
-    ? (import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
-    : '/api';
-
-async function authHeaders(): Promise<HeadersInit> {
-  const user = auth.currentUser;
-  if (!user) return {};
-  const token = await user.getIdToken();
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
-}
+const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
 interface HistoryEntry {
   role: string;
@@ -35,7 +20,7 @@ export async function* sendMessageStream(
 
   const response = await fetch(`${API}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       message: prompt,
       history: messages,
@@ -97,14 +82,11 @@ export interface IndexCorpusResponse {
   errors: Array<{ path: string; error: string }>;
 }
 
-export async function uploadDocument(
-  file: File,
-): Promise<Document> {
+export async function uploadDocument(file: File): Promise<Document> {
   const body = new FormData();
   body.append("file", file);
   const response = await fetch(`${API}/documents/upload`, {
     method: "POST",
-    headers: await authHeaders(),
     body,
   });
   if (!response.ok) {
@@ -115,13 +97,13 @@ export async function uploadDocument(
 }
 
 export async function listDocuments(): Promise<Document[]> {
-  const response = await fetch(`${API}/documents`, { headers: await authHeaders() });
+  const response = await fetch(`${API}/documents`);
   if (!response.ok) throw new Error("Impossible de charger les documents.");
   return response.json();
 }
 
 export async function getCorpusStats(): Promise<CorpusStats> {
-  const response = await fetch(`${API}/documents/stats`, { headers: await authHeaders() });
+  const response = await fetch(`${API}/documents/stats`);
   if (!response.ok) throw new Error("Impossible de charger le corpus.");
   return response.json();
 }
@@ -129,7 +111,6 @@ export async function getCorpusStats(): Promise<CorpusStats> {
 export async function startIndexCorpus(): Promise<void> {
   const response = await fetch(`${API}/documents/index-corpus`, {
     method: "POST",
-    headers: await authHeaders(),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
@@ -146,13 +127,13 @@ export interface IndexStatus {
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {
-  const response = await fetch(`${API}/documents/index-corpus/status`, { headers: await authHeaders() });
+  const response = await fetch(`${API}/documents/index-corpus/status`);
   if (!response.ok) throw new Error("Impossible de vérifier le statut.");
   return response.json();
 }
 
 export async function listModels(): Promise<ModelsResponse> {
-  const response = await fetch(`${API}/models`, { headers: await authHeaders() });
+  const response = await fetch(`${API}/models`);
   if (!response.ok) throw new Error("Impossible de charger les modeles.");
   return response.json();
 }
@@ -160,7 +141,6 @@ export async function listModels(): Promise<ModelsResponse> {
 export async function deleteDocument(id: string): Promise<void> {
   const response = await fetch(`${API}/documents/${id}`, {
     method: "DELETE",
-    headers: await authHeaders(),
   });
   if (!response.ok) throw new Error("Impossible de supprimer le document.");
 }
@@ -180,7 +160,7 @@ export interface DocumentContent {
 }
 
 export async function getDocumentContent(id: string): Promise<DocumentContent> {
-  const response = await fetch(`${API}/documents/${id}/content`, { headers: await authHeaders() });
+  const response = await fetch(`${API}/documents/${id}/content`);
   if (!response.ok) throw new Error("Impossible de charger le contenu du document.");
   return response.json();
 }
@@ -188,7 +168,7 @@ export async function getDocumentContent(id: string): Promise<DocumentContent> {
 export async function updateDocumentContent(id: string, content: string): Promise<Document> {
   const response = await fetch(`${API}/documents/${id}/content`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
   if (!response.ok) {
@@ -201,7 +181,7 @@ export async function updateDocumentContent(id: string, content: string): Promis
 export async function createDocument(name: string, content: string): Promise<Document> {
   const response = await fetch(`${API}/documents`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, content }),
   });
   if (!response.ok) {

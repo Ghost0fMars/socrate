@@ -184,3 +184,29 @@ export async function getDocumentContent(id: string): Promise<DocumentContent> {
   if (!response.ok) throw new Error("Impossible de charger le contenu du document.");
   return response.json();
 }
+
+export async function updateDocumentContent(id: string, content: string): Promise<Document> {
+  const response = await fetch(`${API}/documents/${id}/content`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail ?? "Impossible de modifier le document.");
+  }
+  return response.json();
+}
+
+export async function createDocument(name: string, content: string): Promise<Document> {
+  const response = await fetch(`${API}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ name, content }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail ?? "Impossible de créer le document.");
+  }
+  return response.json();
+}

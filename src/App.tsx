@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, LogOut, LogIn } from "lucide-react";
+import { BookOpen, Loader2, FileText, Trash2, UploadCloud, X, Download, History, Plus, Eye, Sun, Moon, LogOut, LogIn, Pencil, FilePlus } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -17,6 +17,8 @@ import {
   getIndexStatus,
   listModels,
   getDocumentContent,
+  updateDocumentContent,
+  createDocument,
   type Document,
   type CorpusStats,
   type ModelInfo,
@@ -127,6 +129,17 @@ export default function App() {
   const [docLoading, setDocLoading] = useState(false);
   const docScrollRef = useRef<HTMLDivElement>(null);
   const docAbortControllerRef = useRef<AbortController | null>(null);
+
+  const [editMode, setEditMode] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+
+  const [showCreateDoc, setShowCreateDoc] = useState(false);
+  const [newDocName, setNewDocName] = useState("");
+  const [newDocContent, setNewDocContent] = useState("");
+  const [creatingDoc, setCreatingDoc] = useState(false);
+  const [createDocError, setCreateDocError] = useState("");
 
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("fr-FR").format(value);
@@ -377,6 +390,8 @@ export default function App() {
     setDocMessages([]);
     setDocInput("");
     setDocContentLoading(true);
+    setEditMode(false);
+    setEditError("");
     try {
       const result = await getDocumentContent(doc.id);
       setDocContent(result.content);
@@ -427,6 +442,56 @@ export default function App() {
     docAbortControllerRef.current?.abort();
     docAbortControllerRef.current = null;
     setDocLoading(false);
+  };
+
+  const handleEditDoc = () => {
+    setEditMode(true);
+    setEditContent(docContent);
+    setEditError("");
+    setReaderTab("text");
+  };
+
+  const handleCancelEdit = () => {
+    setEditMode(false);
+    setEditError("");
+  };
+
+  const handleSaveDoc = async () => {
+    if (!viewingDoc || editSaving) return;
+    setEditSaving(true);
+    setEditError("");
+    try {
+      const updatedDoc = await updateDocumentContent(viewingDoc.id, editContent);
+      setViewingDoc(updatedDoc);
+      const result = await getDocumentContent(updatedDoc.id);
+      setDocContent(result.content);
+      setDocChunks(result.chunks_list ?? []);
+      await loadDocuments();
+      setEditMode(false);
+    } catch (e: unknown) {
+      setEditError(e instanceof Error ? e.message : "Erreur lors de la sauvegarde.");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleCreateDoc = async (e: React.SyntheticEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!newDocName.trim() || creatingDoc) return;
+    setCreatingDoc(true);
+    setCreateDocError("");
+    try {
+      const doc = await createDocument(newDocName.trim(), newDocContent);
+      await loadDocuments();
+      setNewDocName("");
+      setNewDocContent("");
+      setShowCreateDoc(false);
+      await handleViewDoc(doc);
+    } catch (e: unknown) {
+      setCreateDocError(e instanceof Error ? e.message : "Erreur lors de la création.");
+    } finally {
+      setCreatingDoc(false);
+    }
   };
 
   const handleDocQuestion = async (e?: React.SyntheticEvent<HTMLFormElement>) => {
@@ -988,13 +1053,70 @@ export default function App() {
                 <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase">
                   Corpus
                 </span>
-                <button
-                  onClick={() => setShowDocs(false)}
-                  className="text-[#CBC7C0] hover:text-black transition-colors"
-                >
-                  <X size={14} />
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setShowCreateDoc((v) => !v)}
+                    className="text-[#CBC7C0] hover:text-black transition-colors"
+                    title="Nouveau document"
+                  >
+                    <FilePlus size={14} />
+                  </button>
+                  <button
+                    onClick={() => setShowDocs(false)}
+                    className="text-[#CBC7C0] hover:text-black transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
+
+              {/* Create document form */}
+              {showCreateDoc && (
+                <form
+                  onSubmit={handleCreateDoc}
+                  className="px-6 py-4 border-b border-[#E5E2DD] space-y-2 bg-[#F5F2EF] dark:bg-[#1A1A17]"
+                >
+                  <input
+                    type="text"
+                    value={newDocName}
+                    onChange={(e) => setNewDocName(e.target.value)}
+                    placeholder="Nom du document..."
+                    autoFocus
+                    className="w-full bg-white dark:bg-[#0D0D0C] border border-[#E5E2DD] dark:border-[#2D2D29] px-3 py-2 text-[12px] text-[#1A1A1A] dark:text-[#ECEAE4] outline-none"
+                  />
+                  <textarea
+                    value={newDocContent}
+                    onChange={(e) => setNewDocContent(e.target.value)}
+                    placeholder="Contenu initial..."
+                    rows={3}
+                    className="w-full bg-white dark:bg-[#0D0D0C] border border-[#E5E2DD] dark:border-[#2D2D29] px-3 py-2 text-[12px] text-[#1A1A1A] dark:text-[#ECEAE4] outline-none resize-none"
+                  />
+                  {createDocError && (
+                    <p className="text-[11px] text-red-400">{createDocError}</p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCreateDoc(false);
+                        setNewDocName("");
+                        setNewDocContent("");
+                        setCreateDocError("");
+                      }}
+                      className="flex-1 h-7 border border-[#E5E2DD] text-[10px] tracking-widest uppercase text-[#8C8C8C] hover:border-[#CBC7C0] hover:text-black transition-colors"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={!newDocName.trim() || creatingDoc}
+                      className="flex-1 h-7 bg-black dark:bg-white text-white dark:text-black text-[10px] tracking-widest uppercase font-semibold disabled:opacity-30 flex items-center justify-center"
+                    >
+                      {creatingDoc ? <Loader2 size={12} className="animate-spin" /> : "Créer"}
+                    </button>
+                  </div>
+                </form>
+              )}
 
             <div className="grid grid-cols-3 border-b border-[#E5E2DD]">
               <div className="px-4 py-4 border-r border-[#E5E2DD]">
@@ -1153,18 +1275,50 @@ export default function App() {
                 </p>
                 <h2 className="text-sm font-medium text-[#1A1A1A]">{viewingDoc.name}</h2>
               </div>
-              <button
-                onClick={() => {
-                  docAbortControllerRef.current?.abort();
-                  setViewingDoc(null);
-                  setDocContent("");
-                  setDocMessages([]);
-                  setDocLoading(false);
-                }}
-                className="text-[#CBC7C0] hover:text-black transition-colors"
-              >
-                <X size={16} />
-              </button>
+              <div className="flex items-center gap-4">
+                {!editMode ? (
+                  <button
+                    onClick={handleEditDoc}
+                    className="text-[#CBC7C0] hover:text-black transition-colors"
+                    title="Modifier le document"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-3">
+                    {editError && (
+                      <span className="text-[11px] text-red-400">{editError}</span>
+                    )}
+                    <button
+                      onClick={handleCancelEdit}
+                      className="text-[11px] tracking-widest text-[#8C8C8C] hover:text-black uppercase font-semibold"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      onClick={handleSaveDoc}
+                      disabled={editSaving}
+                      className="text-[11px] tracking-widest text-black uppercase font-bold disabled:opacity-30 flex items-center gap-1"
+                    >
+                      {editSaving ? <Loader2 size={12} className="animate-spin" /> : "Enregistrer"}
+                    </button>
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    docAbortControllerRef.current?.abort();
+                    setViewingDoc(null);
+                    setDocContent("");
+                    setDocMessages([]);
+                    setDocLoading(false);
+                    setEditMode(false);
+                    setEditError("");
+                  }}
+                  className="text-[#CBC7C0] hover:text-black transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
             {/* Tabs for mobile */}
@@ -1202,6 +1356,15 @@ export default function App() {
                 {docContentLoading ? (
                   <div className="flex items-center justify-center h-full">
                     <Loader2 size={20} className="animate-spin text-[#8C8C8C]" />
+                  </div>
+                ) : editMode ? (
+                  <div className="max-w-2xl mx-auto h-full flex flex-col">
+                    <textarea
+                      value={editContent}
+                      onChange={(e) => setEditContent(e.target.value)}
+                      className="flex-1 w-full min-h-[60vh] text-[13px] font-light leading-relaxed text-[#1A1A1A] dark:text-[#ECEAE4] bg-transparent outline-none resize-none border border-[#E5E2DD] dark:border-[#2D2D29] rounded p-4"
+                      placeholder="Contenu du document..."
+                    />
                   </div>
                 ) : (
                   <div className="max-w-2xl mx-auto">

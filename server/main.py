@@ -3,6 +3,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -146,6 +147,15 @@ def _get_doc_sources(user_id: str) -> dict[str, str]:
 
 def _invalidate_cache(user_id: str) -> None:
     _doc_sources_cache_by_user.pop(user_id, None)
+
+
+class UpdateContentRequest(BaseModel):
+    content: str
+
+
+class CreateDocumentRequest(BaseModel):
+    name: str
+    content: str = ""
 
 
 class ChatMessage(BaseModel):
@@ -986,3 +996,109 @@ async def delete_document(doc_id: str, authorization: str = Header(None)):
 
     _invalidate_cache(user_id)
     return {"deleted": doc_id}
+
+
+@app.patch("/documents/{doc_id}/content")
+async def update_document_content(doc_id: str, body: UpdateContentRequest, authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
+    collection_name, _ = get_active_collection()
+
+    must_conditions = [
+        models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))
+    ]
+    if user_id and user_id != "anonymous":
+        must_conditions.append(
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))
+        )
+
+    try:
+        with _qdrant_lock:
+            records, _ = qdrant_client.scroll(
+                collection_name=collection_name,
+                scroll_filter=models.Filter(must=must_conditions),
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not records:
+        raise HTTPException(status_code=404, detail="Document non trouvé.")
+
+    meta = records[0].payload or {}
+    source_name = meta.get("source", "document")
+    path_str = meta.get("path", "")
+    category = meta.get("category", "")
+
+    if path_str:
+        path = pathlib.Path(path_str)
+        if path.suffix.lower() not in (".txt", ".md"):
+            raise HTTPException(
+                status_code=400,
+                detail="Seuls les fichiers TXT et MD peuvent être modifiés directement."
+            )
+        try:
+            path.write_text(body.content, encoding="utf-8")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Impossible d'écrire le fichier: {exc}")
+    else:
+        safe_stem = re.sub(r'[^\w\s\-]', '', source_name.rsplit(".", 1)[0], flags=re.UNICODE).strip()
+        safe_stem = re.sub(r'\s+', '-', safe_stem) or "document"
+        CORPUS_PATH.mkdir(parents=True, exist_ok=True)
+        path = CORPUS_PATH / f"{safe_stem}.md"
+        if path.exists():
+            path = CORPUS_PATH / f"{safe_stem}_{doc_id[:8]}.md"
+        try:
+            path.write_text(body.content, encoding="utf-8")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Impossible de créer le fichier: {exc}")
+        category = ""
+
+    content_to_index = body.content if body.content.strip() else "# " + source_name
+    result = await asyncio.to_thread(
+        index_text,
+        filename=path.name,
+        text=content_to_index,
+        path=path,
+        category=category,
+        user_id=user_id,
+    )
+    return result
+
+
+@app.post("/documents", status_code=201)
+async def create_document(body: CreateDocumentRequest, authorization: str = Header(None)):
+    user_id = await get_current_user_id(authorization)
+
+    name = body.name.strip() or "nouveau-document"
+    safe_name = re.sub(r'[^\w\s\-\.]', '', name, flags=re.UNICODE).strip()
+    safe_name = re.sub(r'\s+', '-', safe_name) or "document"
+    if '.' not in safe_name:
+        safe_name += ".md"
+
+    CORPUS_PATH.mkdir(parents=True, exist_ok=True)
+    path = CORPUS_PATH / safe_name
+    if path.exists():
+        stem = pathlib.Path(safe_name).stem
+        ext = pathlib.Path(safe_name).suffix
+        path = CORPUS_PATH / f"{stem}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+
+    content = body.content.strip() if body.content else ""
+    if not content:
+        content = f"# {name}\n"
+
+    try:
+        path.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Impossible de créer le fichier: {exc}")
+
+    result = await asyncio.to_thread(
+        index_text,
+        filename=path.name,
+        text=content,
+        path=path,
+        category="",
+        user_id=user_id,
+    )
+    return result

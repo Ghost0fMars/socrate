@@ -131,7 +131,11 @@ function startBackend() {
 
   const isWindows = process.platform === 'win32';
   const command = isWindows ? 'cmd' : 'bash';
-  const args = isWindows ? ['/c', 'call', 'start.bat'] : ['start.sh'];
+  // Absolute path required: NoDefaultCurrentDirectoryInExePath disables cwd-relative
+  // .bat lookup on some Windows machines, so a bare "start.bat" silently fails to resolve.
+  const args = isWindows
+    ? ['/c', 'call', path.join(serverDir, 'start.bat')]
+    : ['start.sh'];
 
   backendProcess = spawn(command, args, {
     cwd: serverDir,

@@ -1,5 +1,4 @@
 node_modules/
-build/
 dist/
 electron-dist/
 release/
@@ -13,6 +12,5 @@ server/.venv/
 **/*.pyc
 **/*.pyo
 **/*.pyd
-server/chroma_db/
 
 .vercel

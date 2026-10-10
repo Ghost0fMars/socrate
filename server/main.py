@@ -10,14 +10,12 @@ import uuid
 from datetime import datetime, timezone
 
 from qdrant_client import QdrantClient, models
-import ollama
 import pypdf
 from docx import Document as DocxDocument
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from ollama import AsyncClient
 from pydantic import BaseModel, Field
 
 _ENV_LOCAL = pathlib.Path(__file__).parent.parent / ".env.local"
@@ -36,14 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
-EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-
-# Si la clé Albert est définie, Albert remplace Ollama pour le chat et les embeddings.
-USE_ALBERT = bool(socrate_core.ALBERT_API_KEY)
-if USE_ALBERT:
-    CHAT_MODEL = socrate_core.ALBERT_MODEL
-    EMBED_MODEL = socrate_core.ALBERT_EMBED_MODEL
+if not socrate_core.ALBERT_API_KEY:
+    print("ALBERT_API_KEY absente de .env.local : le chat et l'indexation échoueront.", flush=True)
 
 CORPUS_PATH = pathlib.Path(
     os.getenv(
@@ -52,15 +44,6 @@ CORPUS_PATH = pathlib.Path(
     )
 )
 SUPPORTED_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
-NON_CHAT_MODEL_MARKERS = (
-    "embed",
-    "embedding",
-    "bge-",
-    "e5-",
-    "gte-",
-    "nomic-embed",
-    "snowflake-arctic-embed",
-)
 
 async def get_current_user_id(authorization: str = Header(None)) -> str:
     # Local backend — no authentication required. All users are "local".
@@ -75,10 +58,8 @@ qdrant_client = QdrantClient(path=str(_DB_PATH))
 _qdrant_lock = threading.Lock()
 
 def get_active_collection() -> tuple[str, int]:
-    # Une collection par modèle d'embeddings : les vecteurs ne sont pas comparables entre modèles.
-    if USE_ALBERT:
-        return "documents_bge_m3", 1024
-    return "documents", 768
+    # Collection des vecteurs bge-m3 (Albert), 1024 dimensions.
+    return "documents_bge_m3", 1024
 
 def _ensure_collection(collection_name: str, size: int) -> None:
     try:
@@ -267,17 +248,10 @@ def delete_existing_path(path: pathlib.Path, user_id: str) -> None:
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    if USE_ALBERT:
-        try:
-            return socrate_core.albert_embed(texts, EMBED_MODEL)
-        except Exception as e:
-            print(f"Albert embedding error: {e}", flush=True)
-            raise
     try:
-        response = ollama.embed(model=EMBED_MODEL, input=texts)
-        return response.embeddings
+        return socrate_core.albert_embed(texts)
     except Exception as e:
-        print(f"Ollama embedding error: {e}", flush=True)
+        print(f"Albert embedding error: {e}", flush=True)
         raise
 
 def get_embedding(text: str) -> list[float]:
@@ -572,43 +546,19 @@ def retrieve_style_context(query: str, n_results: int = 3, user_id: str = "anony
     return "\n\n---\n\n".join(parts)
 
 
-def is_chat_model(name: str) -> bool:
-    normalized = name.lower()
-    return not any(marker in normalized for marker in NON_CHAT_MODEL_MARKERS)
-
-
 def list_chat_models() -> list[dict]:
-    result_models = []
-    if USE_ALBERT:
-        try:
-            return socrate_core.albert_chat_models()
-        except Exception as exc:
-            print(f"Albert models error: {exc}", flush=True)
-            return []
     try:
-        response = ollama.list()
-        ollama_models = response.get("models", [])
-        for model in ollama_models:
-            name = model.get("name") or model.get("model", "")
-            if name and is_chat_model(name):
-                result_models.append({
-                    "name": name,
-                    "size": model.get("size", 0),
-                    "modified_at": str(model.get("modified_at", "")),
-                })
-    except Exception:
-        pass
-    return result_models
+        return socrate_core.albert_chat_models()
+    except Exception as exc:
+        print(f"Albert models error: {exc}", flush=True)
+        return []
 
 
 def resolve_default_model(chat_models: list[dict] | None = None) -> str:
-    """CHAT_MODEL s'il est installé, sinon le premier modèle de chat disponible."""
+    """ALBERT_MODEL s'il est proposé par Albert, sinon le premier modèle de chat disponible."""
     names = [m["name"] for m in (list_chat_models() if chat_models is None else chat_models)]
-    if not names:
-        return CHAT_MODEL
-    for name in names:
-        if name == CHAT_MODEL or name.split(":")[0] == CHAT_MODEL:
-            return name
+    if not names or socrate_core.ALBERT_MODEL in names:
+        return socrate_core.ALBERT_MODEL
     return names[0]
 
 
@@ -630,7 +580,7 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
         request.message, history_list, context, style_context, request.use_corpus
     )
 
-    async def generate_albert():
+    async def generate():
         try:
             print(f"[chat] calling albert model={model!r}", flush=True)
             async for content in socrate_core.albert_stream(model, messages):
@@ -640,23 +590,7 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
             traceback.print_exc()
             yield f"\n[ERREUR SERVEUR: {type(exc).__name__}: {exc}]"
 
-    async def generate():
-        try:
-            print(f"[chat] calling ollama model={model!r}", flush=True)
-            async for chunk in await AsyncClient().chat(
-                model=model, messages=messages, stream=True
-            ):
-                content = chunk.message.content
-                if content:
-                    yield content
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            yield f"\n[ERREUR SERVEUR: {type(exc).__name__}: {exc}]"
-
-    return StreamingResponse(
-        generate_albert() if USE_ALBERT else generate(), media_type="text/plain"
-    )
+    return StreamingResponse(generate(), media_type="text/plain")
 
 
 @app.get("/models")

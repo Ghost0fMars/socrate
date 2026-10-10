@@ -2,7 +2,9 @@
 
 > **Interface de pensée locale et souveraine avec IA** — Une plateforme d'accompagnement de recherche maïeutique basée sur l'Intégrale Dramatique et le verrouillage rigoureux de corpus. 
 > 
-> *Construit avec Electron + React + FastAPI + Ollama/OpenAI + Qdrant.*
+> *Construit avec Electron + React + FastAPI + [Albert API](https://albert.api.etalab.gouv.fr) + Qdrant.*
+>
+> Version d'essai en ligne : **https://socrate.alacle.org**
 
 ---
 
@@ -37,8 +39,9 @@ Pour garantir la rigueur scientifique de l'accompagnement :
 * **Appel au document :** Si la référence est introuvable ou si le corpus est vide pour une requête donnée, Socrate interrompt la discussion spéculative et demande poliment à l'utilisateur de lui **transmettre ou d'uploader le fichier concerné** pour pouvoir engager l'analyse.
 
 ### 4. Souveraineté, Privauté et Hybridation
-* **100% Local par défaut :** Socrate fait tourner ses modèles de langage (Llama 3.2, Qwen, Gemma) et ses embeddings de manière totalement privée et locale via Ollama et une base vectorielle Qdrant intégrée. Vos pensées privées et journaux intimes ne quittent jamais votre machine.
-* **Hybridation Cloud-Safe :** La version en ligne (déployée sous Vercel) communique avec un Qdrant Cloud sécurisé et l'API OpenAI, tout en préservant le formatage original des fichiers via une persistance vectorielle `full_content` optimisée.
+* **IA souveraine :** le chat et les embeddings passent par Albert API, l'IA de l'État opérée par la DINUM et hébergée en France (Mistral Small par défaut, embeddings `bge-m3`).
+* **Application de bureau :** le corpus reste sur votre machine (dossier `SOCRATE_CORPUS_PATH`), indexé dans une base Qdrant locale ; seuls les extraits utiles à chaque question sont envoyés à Albert.
+* **Version web (vitrine) :** sans compte. Les documents, l'index vectoriel et les conversations de chaque visiteur restent dans son navigateur ; le serveur (`api/index.py`, sur Vercel) ne fait que relayer vers Albert et ne stocke rien.
 
 ---
 
@@ -46,7 +49,15 @@ Pour garantir la rigueur scientifique de l'accompagnement :
 
 - [Node.js](https://nodejs.org) v20+
 - [Python](https://python.org) 3.11+
-- [Ollama](https://ollama.com) avec les modèles de chat (`llama3.2`) et d'embeddings (`nomic-embed-text`) installés localement.
+- Une clé [Albert API](https://albert.api.etalab.gouv.fr), dans un fichier `.env.local` à la racine :
+
+```bash
+ALBERT_API_KEY=sk-...
+ALBERT_BASE_URL=https://albert.api.etalab.gouv.fr/v1
+ALBERT_MODEL=mistral-small-3-2-24b-instruct-2506   # optionnel
+ALBERT_EMBED_MODEL=bge-m3                          # optionnel
+SOCRATE_CORPUS_PATH=/chemin/vers/votre/corpus      # optionnel (défaut : ~/Documents/SocrateCorpus)
+```
 
 ---
 
@@ -80,6 +91,12 @@ Pour packager l'application en exécutable autonome de bureau :
 npm run electron:start  # Pour tester en mode Electron local
 npm run dist            # Pour compiler et générer l'installateur dans release/
 ```
+
+---
+
+## 🌐 Version web (Vercel)
+
+`npm run build:web` compile l'interface en mode navigateur (`VITE_WEB_MODE=true`). Le déploiement Vercel est décrit par `vercel.json` : l'interface statique dans `dist/` et le relais Albert dans `api/index.py`. La seule variable d'environnement à définir sur Vercel est `ALBERT_API_KEY`.
 
 Les installateurs et packages binaires finaux seront générés dans le dossier `release/`.
 

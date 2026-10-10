@@ -176,3 +176,55 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+
+/* Respiration du logo : inspiration lente, courte retenue, expiration plus longue.
+   Le disque se gonfle, le losange se resserre en sens inverse, un halo part à l'expiration.
+   Pendant une réponse (data-thinking), le souffle s'accélère. */
+.socrate-breath {
+  --breath-duration: 6.5s;
+  position: relative;
+  animation: socrate-breath var(--breath-duration) cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.socrate-breath::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 1px solid var(--text-tertiary);
+  opacity: 0;
+  pointer-events: none;
+  animation: socrate-exhale var(--breath-duration) ease-out infinite;
+}
+
+.socrate-breath-core {
+  animation: socrate-breath-core var(--breath-duration) cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.socrate-breath[data-thinking="true"] {
+  --breath-duration: 2.6s;
+}
+
+@keyframes socrate-breath {
+  0%, 100% { scale: 1; }
+  40%, 48% { scale: 1.08; }
+}
+
+@keyframes socrate-breath-core {
+  0%, 100% { scale: 1; }
+  40%, 48% { scale: 0.8; }
+}
+
+@keyframes socrate-exhale {
+  0%, 48% { scale: 1; opacity: 0; }
+  52% { scale: 1.05; opacity: 0.55; }
+  100% { scale: 1.9; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .socrate-breath,
+  .socrate-breath::after,
+  .socrate-breath-core {
+    animation: none;
+  }
+}

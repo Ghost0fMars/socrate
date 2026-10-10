@@ -635,8 +635,12 @@ export default function App() {
         {/* Left Navigation */}
         <nav className="hidden md:flex w-20 border-r border-[#E5E2DD] flex-col items-center justify-between py-10 shrink-0">
           <div className="flex flex-col items-center gap-8">
-            <div className="w-8 h-8 rounded-full bg-black flex items-center justify-center">
-              <div className="w-3 h-3 bg-white rotate-45"></div>
+            <div
+              className="socrate-breath w-8 h-8 rounded-full bg-black flex items-center justify-center"
+              data-thinking={isLoading}
+              title={isLoading ? "Socrate réfléchit…" : "Socrate"}
+            >
+              <div className="socrate-breath-core w-3 h-3 bg-white rotate-45"></div>
             </div>
             <span className="text-[10px] tracking-[0.3em] font-semibold text-[#8C8C8C] uppercase [writing-mode:vertical-rl] rotate-180">
               S0CR4T3
@@ -809,7 +813,7 @@ export default function App() {
                   >
                     <div className="flex items-center justify-between mb-4">
                       <p className="text-[10px] tracking-widest text-[#8C8C8C] uppercase font-semibold">
-                        {message.role === "user" ? "Vous" : "L'Esprit"}
+                        {message.role === "user" ? "Vous" : "S0CR4T3"}
                       </p>
                       {message.role === "model" && (
                         <button
@@ -1322,7 +1326,7 @@ export default function App() {
                       >
                         <div className={`max-w-[90%] ${msg.role === "user" ? "text-right" : "text-left"}`}>
                           <p className="text-[9px] tracking-widest text-[#8C8C8C] uppercase font-semibold mb-2">
-                            {msg.role === "user" ? "Vous" : "L'Esprit"}
+                            {msg.role === "user" ? "Vous" : "S0CR4T3"}
                           </p>
                           <div className="text-[13px] leading-relaxed font-light text-[#1A1A1A] dark:text-[#ECEAE4]">
                             {msg.role === "user" ? (

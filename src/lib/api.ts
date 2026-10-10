@@ -1,4 +1,9 @@
+import * as web from './web';
+
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
+// Version web (vitrine) : index et conversations dans le navigateur, serveur = relais Albert.
+export const WEB_MODE = import.meta.env.VITE_WEB_MODE === 'true';
 
 interface HistoryEntry {
   role: string;
@@ -18,6 +23,8 @@ export async function* sendMessageStream(
     content: m.content,
   }));
 
+  const context = WEB_MODE && useCorpus ? await web.retrieveContext(prompt, docId) : undefined;
+
   const response = await fetch(`${API}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -27,6 +34,7 @@ export async function* sendMessageStream(
       use_corpus: useCorpus,
       model,
       doc_id: docId ?? null,
+      context,
     }),
     signal,
   });
@@ -83,6 +91,7 @@ export interface IndexCorpusResponse {
 }
 
 export async function uploadDocument(file: File): Promise<Document> {
+  if (WEB_MODE) return web.uploadDocument(file);
   const body = new FormData();
   body.append("file", file);
   const response = await fetch(`${API}/documents/upload`, {
@@ -97,18 +106,21 @@ export async function uploadDocument(file: File): Promise<Document> {
 }
 
 export async function listDocuments(): Promise<Document[]> {
+  if (WEB_MODE) return web.listDocuments();
   const response = await fetch(`${API}/documents`);
   if (!response.ok) throw new Error("Impossible de charger les documents.");
   return response.json();
 }
 
 export async function getCorpusStats(): Promise<CorpusStats> {
+  if (WEB_MODE) return web.getCorpusStats();
   const response = await fetch(`${API}/documents/stats`);
   if (!response.ok) throw new Error("Impossible de charger le corpus.");
   return response.json();
 }
 
 export async function startIndexCorpus(): Promise<void> {
+  if (WEB_MODE) throw new Error("Indisponible dans la version web.");
   const response = await fetch(`${API}/documents/index-corpus`, {
     method: "POST",
   });
@@ -127,6 +139,7 @@ export interface IndexStatus {
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {
+  if (WEB_MODE) throw new Error("Indisponible dans la version web.");
   const response = await fetch(`${API}/documents/index-corpus/status`);
   if (!response.ok) throw new Error("Impossible de vérifier le statut.");
   return response.json();
@@ -139,6 +152,7 @@ export async function listModels(): Promise<ModelsResponse> {
 }
 
 export async function deleteDocument(id: string): Promise<void> {
+  if (WEB_MODE) return web.deleteDocument(id);
   const response = await fetch(`${API}/documents/${id}`, {
     method: "DELETE",
   });
@@ -160,12 +174,14 @@ export interface DocumentContent {
 }
 
 export async function getDocumentContent(id: string): Promise<DocumentContent> {
+  if (WEB_MODE) return web.getDocumentContent(id);
   const response = await fetch(`${API}/documents/${id}/content`);
   if (!response.ok) throw new Error("Impossible de charger le contenu du document.");
   return response.json();
 }
 
 export async function updateDocumentContent(id: string, content: string): Promise<Document> {
+  if (WEB_MODE) return web.updateDocumentContent(id, content);
   const response = await fetch(`${API}/documents/${id}/content`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -179,6 +195,7 @@ export async function updateDocumentContent(id: string, content: string): Promis
 }
 
 export async function createDocument(name: string, content: string): Promise<Document> {
+  if (WEB_MODE) return web.createDocument(name, content);
   const response = await fetch(`${API}/documents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -10,7 +10,6 @@ import uuid
 from datetime import datetime, timezone
 
 from qdrant_client import QdrantClient, models
-import httpx
 import ollama
 import pypdf
 from docx import Document as DocxDocument
@@ -20,11 +19,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
 from pydantic import BaseModel, Field
-from metrics.dramatic_integral import calculate_dramatic_tension
 
 _ENV_LOCAL = pathlib.Path(__file__).parent.parent / ".env.local"
 if _ENV_LOCAL.exists():
     load_dotenv(_ENV_LOCAL, override=False)
+
+# Importé après load_dotenv : le module lit la configuration Albert à l'import.
+import socrate_core  # noqa: E402
 
 app = FastAPI()
 
@@ -38,19 +39,12 @@ app.add_middleware(
 CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
-# Albert API (DINUM / Etalab), compatible OpenAI. Si la clé est définie, Albert
-# remplace Ollama pour le chat et les embeddings.
-ALBERT_API_KEY = os.getenv("ALBERT_API_KEY", "")
-ALBERT_BASE_URL = os.getenv("ALBERT_BASE_URL", "https://albert.api.etalab.gouv.fr/v1").rstrip("/")
-USE_ALBERT = bool(ALBERT_API_KEY)
-ALBERT_CHAT_TYPES = ("text-generation", "image-text-to-text")
+# Si la clé Albert est définie, Albert remplace Ollama pour le chat et les embeddings.
+USE_ALBERT = bool(socrate_core.ALBERT_API_KEY)
 if USE_ALBERT:
-    CHAT_MODEL = os.getenv("ALBERT_MODEL", "mistral-small-3-2-24b-instruct-2506")
-    EMBED_MODEL = os.getenv("ALBERT_EMBED_MODEL", "bge-m3")
+    CHAT_MODEL = socrate_core.ALBERT_MODEL
+    EMBED_MODEL = socrate_core.ALBERT_EMBED_MODEL
 
-
-def _albert_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {ALBERT_API_KEY}"}
 CORPUS_PATH = pathlib.Path(
     os.getenv(
         "SOCRATE_CORPUS_PATH",
@@ -275,15 +269,7 @@ def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
         return []
     if USE_ALBERT:
         try:
-            response = httpx.post(
-                f"{ALBERT_BASE_URL}/embeddings",
-                headers=_albert_headers(),
-                json={"model": EMBED_MODEL, "input": texts},
-                timeout=120,
-            )
-            response.raise_for_status()
-            data = sorted(response.json()["data"], key=lambda item: item["index"])
-            return [item["embedding"] for item in data]
+            return socrate_core.albert_embed(texts, EMBED_MODEL)
         except Exception as e:
             print(f"Albert embedding error: {e}", flush=True)
             raise
@@ -595,15 +581,10 @@ def list_chat_models() -> list[dict]:
     result_models = []
     if USE_ALBERT:
         try:
-            response = httpx.get(f"{ALBERT_BASE_URL}/models", headers=_albert_headers(), timeout=20)
-            response.raise_for_status()
-            for model in response.json().get("data", []):
-                name = model.get("id", "")
-                if model.get("type") in ALBERT_CHAT_TYPES and "ocr" not in name:
-                    result_models.append({"name": name, "size": 0, "modified_at": ""})
+            return socrate_core.albert_chat_models()
         except Exception as exc:
             print(f"Albert models error: {exc}", flush=True)
-        return result_models
+            return []
     try:
         response = ollama.list()
         ollama_models = response.get("models", [])
@@ -645,104 +626,15 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
     model = request.model or await asyncio.to_thread(resolve_default_model)
 
     history_list = [{"role": msg.role, "content": msg.content} for msg in request.history]
-    tension_metrics = calculate_dramatic_tension(history_list, request.message, context)
-    is_maieutic = tension_metrics["maieutic_posture"]
-    tension_score = tension_metrics["tension_score"]
-
-    system_prompt = (
-        "Tu es un directeur de recherche universitaire spécialisé en théorie de l'art, "
-        "de l'écriture narrative et de la représentation. "
-        "Tu connais intimement les travaux de cet étudiant — tu as lu ses textes, "
-        "ses scénarios, son journal. Tu travailles depuis son corpus et depuis sa propre écriture.\n\n"
-        f"[PEDAGOGICAL METRICS: Dramatic Tension S(t)={tension_score}, Posture={'Maïeutique Pure' if is_maieutic else 'Accompagnement Direct'}]\n\n"
-        "Ton approche :\n"
-        "— Tu poses des questions qui déstabilisent les certitudes sans les détruire.\n"
-        "— Tu exiges que chaque affirmation soit étayée, chaque concept défini avec précision.\n"
-        "— Tu identifies les glissements conceptuels, les contradictions, "
-        "les raccourcis intellectuels non justifiés.\n"
-        "— Tu proposes des pistes depuis le corpus quand c'est pertinent, "
-        "avec la référence exacte entre crochets.\n"
-        "— Tu reconnais la voix de cet étudiant et tu t'y accordes — "
-        "tu adoptes son registre, son rythme, sa façon d'articuler les idées.\n"
-        "— Tu ne flattes pas. Tu stimules. Tu exiges.\n\n"
+    messages = socrate_core.build_chat_messages(
+        request.message, history_list, context, style_context, request.use_corpus
     )
-
-    if is_maieutic:
-        system_prompt += (
-            "POSTURE MAÏEUTIQUE STRICTE (Tension cumulée S(t) faible) :\n"
-            "— Tu REFUSES catégoriquement de donner des réponses directes, de faire des résumés ou de valider platement les concepts.\n"
-            "— Tu réponds uniquement par des relances maïeutiques, en pointant les contradictions ou en renvoyant l'étudiant à ses propres notes passées.\n"
-            "— Provoque le déclic par l'effort cognitif et la problématisation.\n\n"
-        )
-    else:
-        system_prompt += (
-            "POSTURE D'ACCOMPAGNEMENT DIRECT (Tension critique S(t) atteinte) :\n"
-            "— L'effort cognitif de l'étudiant est suffisant. Tu peux maintenant être plus explicite, direct et l'aider à conceptualiser.\n"
-            "— Valide constructivement ses idées, apporte des pistes directes et accompagne sa synthèse.\n\n"
-        )
-
-    system_prompt += "Réponds en français. Sois précis, exigeant, et intellectuellement stimulant."
-
-    if style_context:
-        system_prompt += (
-            "\n\nExtraits de l'écriture de cet étudiant — "
-            "calibre ta voix sur la sienne :\n\n"
-            + style_context
-        )
-
-    if request.use_corpus:
-        if context.strip():
-            system_prompt += (
-                "\n\nCorpus de recherche. Utilise uniquement ces extraits pour répondre. "
-                "Cite obligatoirement la source exacte entre crochets avec le nom du fichier. "
-                "Si les extraits fournis ne contiennent pas d'information ou de référence précise pour répondre à la question de l'étudiant, "
-                "tu dois IMPÉRATIVEMENT refuser de répondre sur le fond et lui demander poliment de te transmettre le document concerné "
-                "ou de l'ajouter à son corpus afin que vous puissiez dialoguer ensemble sur cette base.\n\n"
-                + context
-            )
-        else:
-            system_prompt += (
-                "\n\nIMPORTANT (Corpus manquant/insuffisant) : Tu ne disposes d'AUCUN extrait de corpus pertinent pour cette requête. "
-                "Tu as l'interdiction formelle de répondre sur le fond de la question ou d'inventer des faits. "
-                "Tu dois obligatoirement et poliment déclarer que tu n'as pas trouvé cette référence dans tes documents, "
-                "et demander à l'utilisateur de te transmettre le fichier concerné ou de l'ajouter à son corpus afin de pouvoir engager le dialogue."
-            )
-    else:
-        system_prompt += (
-            "\n\nIMPORTANT : Le corpus n'est pas actif pour cette requête. "
-            "Tu dois impérativement rappeler à l'utilisateur qu'il doit activer son corpus ou te transmettre un document "
-            "pour pouvoir engager un dialogue d'analyse de recherche."
-        )
-
-    messages = [{"role": "system", "content": system_prompt}]
-    for msg in request.history:
-        role = "assistant" if msg.role == "model" else msg.role
-        messages.append({"role": role, "content": msg.content})
-    messages.append({"role": "user", "content": request.message})
 
     async def generate_albert():
         try:
             print(f"[chat] calling albert model={model!r}", flush=True)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=20)) as client:
-                async with client.stream(
-                    "POST",
-                    f"{ALBERT_BASE_URL}/chat/completions",
-                    headers=_albert_headers(),
-                    json={"model": model, "messages": messages, "stream": True},
-                ) as response:
-                    if response.status_code >= 400:
-                        body = (await response.aread()).decode("utf-8", errors="replace")
-                        raise RuntimeError(f"HTTP {response.status_code}: {body[:300]}")
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        payload = line[5:].strip()
-                        if payload == "[DONE]":
-                            break
-                        choices = json.loads(payload).get("choices") or []
-                        content = (choices[0].get("delta") or {}).get("content") if choices else None
-                        if content:
-                            yield content
+            async for content in socrate_core.albert_stream(model, messages):
+                yield content
         except Exception as exc:
             import traceback
             traceback.print_exc()

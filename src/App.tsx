@@ -19,6 +19,7 @@ import {
   getDocumentContent,
   updateDocumentContent,
   createDocument,
+  WEB_MODE,
   type Document,
   type CorpusStats,
   type ModelInfo,
@@ -1047,6 +1048,12 @@ export default function App() {
 
             {/* Upload zone */}
             <div className="px-6 py-5 border-b border-[#E5E2DD]">
+              {WEB_MODE ? (
+                <p className="mb-4 text-[11px] leading-relaxed text-[#8C8C8C]">
+                  Version d'essai : vos documents et conversations restent dans ce navigateur.
+                  Seuls les extraits utiles sont envoyés à Albert, l'IA de l'État, pour répondre.
+                </p>
+              ) : (
               <button
                   type="button"
                   onClick={handleIndexCorpus}
@@ -1060,6 +1067,7 @@ export default function App() {
                   )}
                   {indexingCorpus ? "Indexation du dossier..." : "Indexer SocrateCorpus"}
                 </button>
+              )}
               <div
                 onDragOver={(e) => {
                   e.preventDefault();

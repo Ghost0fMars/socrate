@@ -896,7 +896,7 @@ export default function App() {
                   value={selectedModel}
                   onChange={(e) => setSelectedModel(e.target.value)}
                   disabled={models.length === 0 || isLoading}
-                  title="Modele Ollama"
+                  title="Modele IA"
                   className="h-8 max-w-40 shrink-0 border border-[#E5E2DD] px-2 text-[10px] tracking-widest uppercase text-[#8C8C8C] outline-none transition-colors hover:border-[#CBC7C0] disabled:opacity-30 appearance-none bg-white dark:bg-black"
                 >
                   {models.length === 0 ? (

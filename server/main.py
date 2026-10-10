@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 
 from qdrant_client import QdrantClient, models
+import httpx
 import ollama
 import pypdf
 from docx import Document as DocxDocument
@@ -36,6 +37,20 @@ app.add_middleware(
 
 CHAT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+
+# Albert API (DINUM / Etalab), compatible OpenAI. Si la clé est définie, Albert
+# remplace Ollama pour le chat et les embeddings.
+ALBERT_API_KEY = os.getenv("ALBERT_API_KEY", "")
+ALBERT_BASE_URL = os.getenv("ALBERT_BASE_URL", "https://albert.api.etalab.gouv.fr/v1").rstrip("/")
+USE_ALBERT = bool(ALBERT_API_KEY)
+ALBERT_CHAT_TYPES = ("text-generation", "image-text-to-text")
+if USE_ALBERT:
+    CHAT_MODEL = os.getenv("ALBERT_MODEL", "mistral-small-3-2-24b-instruct-2506")
+    EMBED_MODEL = os.getenv("ALBERT_EMBED_MODEL", "bge-m3")
+
+
+def _albert_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {ALBERT_API_KEY}"}
 CORPUS_PATH = pathlib.Path(
     os.getenv(
         "SOCRATE_CORPUS_PATH",
@@ -66,6 +81,9 @@ qdrant_client = QdrantClient(path=str(_DB_PATH))
 _qdrant_lock = threading.Lock()
 
 def get_active_collection() -> tuple[str, int]:
+    # Une collection par modèle d'embeddings : les vecteurs ne sont pas comparables entre modèles.
+    if USE_ALBERT:
+        return "documents_bge_m3", 1024
     return "documents", 768
 
 def _ensure_collection(collection_name: str, size: int) -> None:
@@ -232,7 +250,7 @@ def get_corpus_category(path: pathlib.Path) -> str:
         relative = path.relative_to(CORPUS_PATH)
     except ValueError:
         return ""
-    return relative.parts[0] if len(relative.parts) > 1 else ""
+    return "/".join(relative.parts[:-1])
 
 
 def delete_existing_path(path: pathlib.Path, user_id: str) -> None:
@@ -255,6 +273,20 @@ def delete_existing_path(path: pathlib.Path, user_id: str) -> None:
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
+    if USE_ALBERT:
+        try:
+            response = httpx.post(
+                f"{ALBERT_BASE_URL}/embeddings",
+                headers=_albert_headers(),
+                json={"model": EMBED_MODEL, "input": texts},
+                timeout=120,
+            )
+            response.raise_for_status()
+            data = sorted(response.json()["data"], key=lambda item: item["index"])
+            return [item["embedding"] for item in data]
+        except Exception as e:
+            print(f"Albert embedding error: {e}", flush=True)
+            raise
     try:
         response = ollama.embed(model=EMBED_MODEL, input=texts)
         return response.embeddings
@@ -559,6 +591,46 @@ def is_chat_model(name: str) -> bool:
     return not any(marker in normalized for marker in NON_CHAT_MODEL_MARKERS)
 
 
+def list_chat_models() -> list[dict]:
+    result_models = []
+    if USE_ALBERT:
+        try:
+            response = httpx.get(f"{ALBERT_BASE_URL}/models", headers=_albert_headers(), timeout=20)
+            response.raise_for_status()
+            for model in response.json().get("data", []):
+                name = model.get("id", "")
+                if model.get("type") in ALBERT_CHAT_TYPES and "ocr" not in name:
+                    result_models.append({"name": name, "size": 0, "modified_at": ""})
+        except Exception as exc:
+            print(f"Albert models error: {exc}", flush=True)
+        return result_models
+    try:
+        response = ollama.list()
+        ollama_models = response.get("models", [])
+        for model in ollama_models:
+            name = model.get("name") or model.get("model", "")
+            if name and is_chat_model(name):
+                result_models.append({
+                    "name": name,
+                    "size": model.get("size", 0),
+                    "modified_at": str(model.get("modified_at", "")),
+                })
+    except Exception:
+        pass
+    return result_models
+
+
+def resolve_default_model(chat_models: list[dict] | None = None) -> str:
+    """CHAT_MODEL s'il est installé, sinon le premier modèle de chat disponible."""
+    names = [m["name"] for m in (list_chat_models() if chat_models is None else chat_models)]
+    if not names:
+        return CHAT_MODEL
+    for name in names:
+        if name == CHAT_MODEL or name.split(":")[0] == CHAT_MODEL:
+            return name
+    return names[0]
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest, authorization: str = Header(None)):
     user_id = await get_current_user_id(authorization)
@@ -570,7 +642,7 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
         )
     else:
         context, style_context = "", ""
-    model = request.model or CHAT_MODEL
+    model = request.model or await asyncio.to_thread(resolve_default_model)
 
     history_list = [{"role": msg.role, "content": msg.content} for msg in request.history]
     tension_metrics = calculate_dramatic_tension(history_list, request.message, context)
@@ -648,6 +720,34 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
         messages.append({"role": role, "content": msg.content})
     messages.append({"role": "user", "content": request.message})
 
+    async def generate_albert():
+        try:
+            print(f"[chat] calling albert model={model!r}", flush=True)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=20)) as client:
+                async with client.stream(
+                    "POST",
+                    f"{ALBERT_BASE_URL}/chat/completions",
+                    headers=_albert_headers(),
+                    json={"model": model, "messages": messages, "stream": True},
+                ) as response:
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        raise RuntimeError(f"HTTP {response.status_code}: {body[:300]}")
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        choices = json.loads(payload).get("choices") or []
+                        content = (choices[0].get("delta") or {}).get("content") if choices else None
+                        if content:
+                            yield content
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            yield f"\n[ERREUR SERVEUR: {type(exc).__name__}: {exc}]"
+
     async def generate():
         try:
             print(f"[chat] calling ollama model={model!r}", flush=True)
@@ -662,27 +762,15 @@ async def chat(request: ChatRequest, authorization: str = Header(None)):
             traceback.print_exc()
             yield f"\n[ERREUR SERVEUR: {type(exc).__name__}: {exc}]"
 
-    return StreamingResponse(generate(), media_type="text/plain")
+    return StreamingResponse(
+        generate_albert() if USE_ALBERT else generate(), media_type="text/plain"
+    )
 
 
 @app.get("/models")
 async def list_models():
-    result_models = []
-    try:
-        response = ollama.list()
-        ollama_models = response.get("models", [])
-        for model in ollama_models:
-            name = model.get("name") or model.get("model", "")
-            if name and is_chat_model(name):
-                result_models.append({
-                    "name": name,
-                    "size": model.get("size", 0),
-                    "modified_at": str(model.get("modified_at", "")),
-                })
-    except Exception:
-        pass
-
-    return {"default": CHAT_MODEL, "models": result_models}
+    result_models = await asyncio.to_thread(list_chat_models)
+    return {"default": resolve_default_model(result_models), "models": result_models}
 
 
 @app.post("/documents/upload")
@@ -708,6 +796,8 @@ async def _run_index_corpus(user_id: str) -> None:
     all_files = sorted(
         p for p in CORPUS_PATH.rglob("*")
         if p.is_file() and p.suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
+        # README_<dossier>.md : inventaires de dossier générés automatiquement, sans contenu à indexer
+        and not p.name.startswith("README_")
     )
 
     collection_name, collection_size = get_active_collection()
